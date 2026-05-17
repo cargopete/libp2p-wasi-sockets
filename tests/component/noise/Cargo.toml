@@ -1,0 +1,21 @@
+[package]
+name = "libp2p-wasi-sockets-noise"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# This crate is only ever built for wasm32-wasip2.
+# It tests the full Noise XX + Yamux upgrade stack on top of WasiTcpTransport.
+
+[[bin]]
+name = "noise"
+path = "src/main.rs"
+
+[dependencies]
+libp2p-wasi-sockets = { path = "../../.." }
+libp2p-core     = { version = "0.43", default-features = false }
+libp2p-noise    = "0.46"
+libp2p-yamux    = "0.47"
+libp2p-identity = { version = "0.2", default-features = false, features = ["ed25519", "rand"] }
+wstd            = "0.6"
+futures         = { version = "0.3", default-features = false, features = ["std", "async-await"] }
