@@ -58,8 +58,12 @@ enum WriteState {
 }
 
 impl WasiTcpStream {
+    /// Wrap a connected `wstd::net::TcpStream` in the libp2p-compatible stream shim.
+    ///
+    /// Consumers typically obtain streams via [`WasiTcpTransport`](crate::WasiTcpTransport), but
+    /// you can also wrap a stream you constructed directly with `wstd::net::TcpStream::connect`.
     #[cfg(target_arch = "wasm32")]
-    pub(crate) fn new(stream: wstd::net::TcpStream) -> Self {
+    pub fn new(stream: wstd::net::TcpStream) -> Self {
         Self {
             inner: Arc::new(stream),
             read_state: ReadState::Idle,
