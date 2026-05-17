@@ -6,6 +6,7 @@ rust-version = "1.83"
 license = "MIT OR Apache-2.0"
 description = "WASI 0.2 sockets transport for rust-libp2p"
 repository = "https://github.com/cargopete/libp2p-wasi-sockets"
+documentation = "https://docs.rs/libp2p-wasi-sockets"
 keywords = ["libp2p", "wasi", "wasm", "p2p", "transport"]
 categories = ["network-programming", "wasm"]
 
@@ -19,15 +20,18 @@ thiserror       = "1"
 tracing         = { version = "0.1", default-features = false }
 
 [dev-dependencies]
-libp2p-swarm    = { version = "0.47", features = ["macros"] }
-libp2p-noise    = "0.46"
-libp2p-yamux    = "0.47"
-libp2p-ping     = "0.47"
-libp2p-identify = "0.47"
-wasmtime        = "44"
-wasmtime-wasi   = "44"
-tokio           = { version = "1", features = ["macros", "rt-multi-thread", "process"] }
-anyhow          = "1"
+libp2p-swarm       = { version = "0.47", features = ["macros"] }
+libp2p-noise       = "0.46"
+libp2p-yamux       = "0.47"
+libp2p-ping        = "0.47"
+libp2p-identify    = "0.47"
+libp2p-identity    = { version = "0.2", features = ["ed25519", "rand"] }
+multistream-select = "0.13"
+tokio-util         = { version = "0.7", features = ["compat"] }
+wasmtime           = "44"
+wasmtime-wasi      = "44"
+tokio              = { version = "1", features = ["macros", "rt-multi-thread", "process", "net"] }
+anyhow             = "1"
 
 [lib]
 crate-type = ["rlib"]
