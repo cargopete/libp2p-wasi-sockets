@@ -51,7 +51,12 @@ struct ListenerState {
     /// In-flight accept future.
     accept_future: Option<WasmBoxFut<std::io::Result<wstd::net::TcpStream>>>,
     /// Whether we have emitted a `NewAddress` event for this listener.
+    /// Also used as a sentinel: set back to `false` after emitting `AddressExpired`
+    /// so the next `poll` knows to emit `ListenerClosed`.
     announced: bool,
+    /// Set by `remove_listener`; causes `poll` to emit `AddressExpired` (if
+    /// `announced`) followed by `ListenerClosed`, then drop the entry.
+    closing: bool,
 }
 
 /// A libp2p transport backed by `wasi:sockets/tcp`.
@@ -129,6 +134,7 @@ impl Transport for WasiTcpTransport {
                     bind_future: Some(bind_fut),
                     accept_future: None,
                     announced: false,
+                    closing: false,
                 },
             );
         }
@@ -144,7 +150,12 @@ impl Transport for WasiTcpTransport {
     fn remove_listener(&mut self, id: ListenerId) -> bool {
         #[cfg(target_arch = "wasm32")]
         {
-            self.listeners.remove(&id).is_some()
+            if let Some(state) = self.listeners.get_mut(&id) {
+                state.closing = true;
+                true
+            } else {
+                false
+            }
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -198,6 +209,37 @@ impl Transport for WasiTcpTransport {
 
             for id in ids {
                 let state = this.listeners.get_mut(&id).unwrap();
+
+                // ── Phase 0: handle closing listeners ─────────────────────────
+                //
+                // Sequence: AddressExpired (if previously announced) → ListenerClosed.
+                // We re-use `announced` as the "AddressExpired not yet sent" flag:
+                // after emitting AddressExpired we set it to false so the next poll
+                // emits ListenerClosed and removes the entry.
+                if state.closing {
+                    state.bind_future = None;
+                    state.accept_future = None;
+                    if state.announced {
+                        let addr = state
+                            .listener
+                            .as_ref()
+                            .and_then(|l| l.local_addr().ok())
+                            .map(socketaddr_to_multiaddr)
+                            .unwrap_or_else(|| socketaddr_to_multiaddr(state.bind_addr));
+                        state.announced = false;
+                        return Poll::Ready(TransportEvent::AddressExpired {
+                            listener_id: id,
+                            listen_addr: addr,
+                        });
+                    }
+                    // AddressExpired already sent (or was never announced).
+                    let _ = state; // end the mutable borrow before remove
+                    this.listeners.remove(&id);
+                    return Poll::Ready(TransportEvent::ListenerClosed {
+                        listener_id: id,
+                        reason: Ok(()),
+                    });
+                }
 
                 // ── Phase 1: drive the bind future ────────────────────────────
                 if let Some(ref mut bind_fut) = state.bind_future {

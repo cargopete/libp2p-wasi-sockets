@@ -144,3 +144,14 @@ async fn m2_transport_dial() -> Result<()> {
     let wasm = build_component("transport")?;
     run_component(&wasm).await
 }
+
+/// M3 — Multi-listener + AddressExpired / ListenerClosed lifecycle events.
+///
+/// Builds and runs `tests/component/multi/` under Wasmtime.  The component
+/// binds two listeners, exchanges bytes through one, removes the other, and
+/// asserts the correct sequence of `AddressExpired` → `ListenerClosed` events.
+#[tokio::test]
+async fn m3_multi_listener() -> Result<()> {
+    let wasm = build_component("multi")?;
+    run_component(&wasm).await
+}
