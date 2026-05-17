@@ -132,3 +132,15 @@ async fn m1_echo_stream() -> Result<()> {
     let wasm = build_component("echo")?;
     run_component(&wasm).await
 }
+
+/// M2 — WasiTcpTransport listen_on + dial.
+///
+/// Builds and runs `tests/component/transport/` under Wasmtime.  The component
+/// calls `Transport::listen_on`, discovers the ephemeral port via
+/// `Transport::poll`, dials it, and exchanges bytes over the resulting
+/// `WasiTcpStream` pair.
+#[tokio::test]
+async fn m2_transport_dial() -> Result<()> {
+    let wasm = build_component("transport")?;
+    run_component(&wasm).await
+}
