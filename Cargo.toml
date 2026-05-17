@@ -19,6 +19,7 @@ multiaddr       = "0.18"
 thiserror       = "1"
 tracing         = { version = "0.1", default-features = false }
 
+# Pure-Rust dev-deps: available on all targets (including wasm32-wasip2 examples).
 [dev-dependencies]
 libp2p-swarm       = { version = "0.47", features = ["macros"] }
 libp2p-noise       = "0.46"
@@ -26,12 +27,16 @@ libp2p-yamux       = "0.47"
 libp2p-ping        = "0.47"
 libp2p-identify    = "0.47"
 libp2p-identity    = { version = "0.2", features = ["ed25519", "rand"] }
+anyhow             = "1"
+
+# Host-only dev-deps: Wasmtime pulls in native C libs (zstd-sys) that cannot
+# cross-compile to wasm32-wasip2.  Gate them so examples still build for wasm.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 multistream-select = "0.13"
 tokio-util         = { version = "0.7", features = ["compat"] }
 wasmtime           = "44"
 wasmtime-wasi      = "44"
 tokio              = { version = "1", features = ["macros", "rt-multi-thread", "process", "net"] }
-anyhow             = "1"
 
 [lib]
 crate-type = ["rlib"]
