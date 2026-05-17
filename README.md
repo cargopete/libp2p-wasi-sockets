@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/cargopete/libp2p-wasi-sockets/actions/workflows/ci.yml/badge.svg)](https://github.com/cargopete/libp2p-wasi-sockets/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/libp2p-wasi-sockets)](https://crates.io/crates/libp2p-wasi-sockets)
+[![docs.rs](https://img.shields.io/docsrs/libp2p-wasi-sockets)](https://docs.rs/libp2p-wasi-sockets)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](LICENSE-MIT)
 
 A [WASI 0.2](https://github.com/WebAssembly/WASI/blob/v0.2.1/README.md) sockets transport for [rust-libp2p](https://github.com/libp2p/rust-libp2p).
@@ -12,7 +13,7 @@ Implements `libp2p_core::Transport` over `wasi:sockets/tcp`, enabling rust-libp2
 
 ## Why does this exist?
 
-As of rust-libp2p 0.56.x, every major sub-crate (`libp2p-core`, `libp2p-swarm`, `libp2p-gossipsub`, `libp2p-noise`, `libp2p-yamux`, `libp2p-ping`, `libp2p-kad`, …) **compiles cleanly for `wasm32-wasip2`**. The only missing piece was a transport: `libp2p-tcp` is gated out for all wasm targets, and no `wasi:sockets`-based alternative existed.
+Every major rust-libp2p sub-crate (`libp2p-core`, `libp2p-swarm`, `libp2p-noise`, `libp2p-yamux`, `libp2p-gossipsub`, …) **compiles cleanly for `wasm32-wasip2`**. The only missing piece was a transport: `libp2p-tcp` is gated out for all wasm targets, and no `wasi:sockets`-based alternative existed.
 
 This crate closes that gap.
 
@@ -20,30 +21,30 @@ This crate closes that gap.
 
 - Run libp2p-based protocols as **sandboxed Wasm Components** in Wasmtime or Spin.
 - Drop P2P functionality into plugin systems that already embed a WASI 0.2 runtime.
-- Leverage the WASI **network capability model** — the host explicitly grants (or denies) network access per component, which is stronger than container-level isolation.
+- Leverage the WASI **network capability model** — the host explicitly grants (or denies) network access per component, giving stronger isolation than containers.
 
 ### What is deliberately out of scope
 
-- UDP / QUIC — `wasi:sockets/udp` doesn't expose the socket controls `quinn` needs.
-- DNS multiaddrs — `/dns4`, `/dns6`, `/dnsaddr` planned for v0.2.
-- Browser support — already covered by `libp2p-websocket-websys` / `libp2p-webtransport-websys`.
-- NAT traversal — AutoNAT, circuit-relay, DCUtR are not supported by the `wasi-sockets` API.
+- **UDP / QUIC** — `wasi:sockets/udp` doesn't expose the socket controls `quinn` needs.
+- **DNS multiaddrs** — `/dns4`, `/dns6`, `/dnsaddr` planned for v0.2.
+- **Browser** — already covered by `libp2p-websocket-websys` / `libp2p-webtransport-websys`.
+- **NAT traversal** — AutoNAT, circuit-relay, DCUtR are not supported by the `wasi-sockets` API.
 
 ---
 
 ## Status
 
-> **Pre-release — v0.1.0-dev.**  API is unstable; milestones in progress.
+**v0.1.0** — all milestones complete; full Noise XX + Yamux interop verified against native rust-libp2p.
 
 | Milestone | Description | Status |
 |---|---|---|
-| M0 | Scaffold, Cargo.toml, CI, multiaddr utils, unit tests | ✅ Done |
-| M1 | `WasiTcpStream` (AsyncRead/AsyncWrite shim) + echo integration test | 🔄 In progress |
-| M2 | `WasiTcpTransport::dial` + two-component raw TCP test | ⏳ Planned |
-| M3 | Full Transport trait: multi-listener, concurrent accept | ⏳ Planned |
-| M4 | Two wasm32-wasip2 components: Noise + Yamux + identify + ping under Wasmtime | ⏳ Planned |
-| M5 | Interop test vs native rust-libp2p | ⏳ Planned |
-| M6 | Docs polish, examples, 0.1.0 crates.io release | ⏳ Planned |
+| M0 | Scaffold, Cargo.toml, CI, multiaddr utils, unit tests | ✅ |
+| M1 | `WasiTcpStream` AsyncRead/AsyncWrite bridge + echo integration test | ✅ |
+| M2 | `WasiTcpTransport` listen\_on + dial integration test | ✅ |
+| M3 | Multi-listener, AddressExpired / ListenerClosed lifecycle events | ✅ |
+| M4 | Noise XX + Yamux upgrade over `WasiTcpTransport` | ✅ |
+| M5 | Interop test: WASM component ↔ native rust-libp2p (tokio) | ✅ |
+| M6 | Docs polish, examples, 0.1.0 crates.io release | ✅ |
 
 ---
 
@@ -52,12 +53,12 @@ This crate closes that gap.
 ```toml
 # Cargo.toml — do NOT enable the `tcp` feature on the umbrella `libp2p` crate
 [dependencies]
-libp2p-wasi-sockets = { git = "https://github.com/cargopete/libp2p-wasi-sockets" }
+libp2p-wasi-sockets = "0.1"
 libp2p-swarm        = "0.47"
 libp2p-noise        = "0.46"
 libp2p-yamux        = "0.47"
 libp2p-ping         = "0.47"
-libp2p-identity     = { version = "0.2", features = ["ed25519"] }
+libp2p-identity     = { version = "0.2", features = ["ed25519", "rand"] }
 wstd                = "0.6"
 ```
 
@@ -146,7 +147,7 @@ wasmtime run -S inherit-network ./target/wasm32-wasip2/release/my_app.wasm
 
 ### Async bridge
 
-`wstd`'s `TcpStream::read` / `write` are `async fn`s; `futures::io::AsyncRead` / `AsyncWrite` are poll-based. The bridge works by boxing each in-flight wstd operation as a `Pin<Box<dyn Future>>` and re-polling it on subsequent `poll_*` calls. On wasm32-wasip2 there are no threads, so the `Send` bound is satisfied via `unsafe impl` — safe because WASI resource handles are plain integers.
+`wstd`'s `TcpStream::read` / `write` are `async fn`s; `futures::io::AsyncRead` / `AsyncWrite` are poll-based. The bridge works by boxing each in-flight wstd operation as a `Pin<Box<dyn Future>>` and re-polling it on subsequent `poll_*` calls. On `wasm32-wasip2` there are no threads, so the `Send` bound is satisfied via `unsafe impl` — safe because WASI resource handles are plain integers.
 
 ---
 
@@ -154,14 +155,7 @@ wasmtime run -S inherit-network ./target/wasm32-wasip2/release/my_app.wasm
 
 ### Do not pull in `libp2p-tcp`
 
-The umbrella `libp2p` crate gates `libp2p-tcp` off for all wasm targets via:
-
-```toml
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-libp2p-tcp = { ... }
-```
-
-If you enable the `tcp` feature (or pull the umbrella crate with it), the build will fail. Depend on sub-crates directly. Verify with:
+The umbrella `libp2p` crate gates `libp2p-tcp` off for all wasm targets, but if you pull it in manually the build will fail. Depend on sub-crates directly and verify:
 
 ```bash
 cargo tree --target wasm32-wasip2 | grep libp2p-tcp
@@ -170,13 +164,13 @@ cargo tree --target wasm32-wasip2 | grep libp2p-tcp
 
 ### Wasmtime network permissions
 
-Wasmtime denies all network access by default. You must explicitly grant it:
+Wasmtime denies all network access by default:
 
 ```bash
 # Grant full network access (development)
 wasmtime run -S inherit-network my_app.wasm
 
-# Grant only specific IP ranges (production)
+# Grant only specific addresses (production)
 wasmtime run --wasi tcp=127.0.0.1:4001 my_app.wasm
 ```
 
@@ -187,12 +181,6 @@ wasmtime run --wasi tcp=127.0.0.1:4001 my_app.wasm
 - Rust **1.83+**
 - Target: `wasm32-wasip2`
 - WASI 0.2 host: Wasmtime ≥ 44, Spin ≥ 3.5, or any WASI 0.2.1-compatible runtime
-
----
-
-## Contributing
-
-The crate is designed to be upstreamed to rust-libp2p as `transports/wasi-sockets/`. See [`CONTRIBUTING.md`](CONTRIBUTING.md) (coming in M6) and the full design rationale in [`RFC-0001`](https://github.com/cargopete/libp2p-wasi-sockets/discussions).
 
 ---
 
