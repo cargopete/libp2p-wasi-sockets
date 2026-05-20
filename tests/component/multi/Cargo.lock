@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "libp2p-wasi-sockets"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "futures",
  "libp2p-core",
@@ -635,6 +635,7 @@ dependencies = [
  "multiaddr",
  "thiserror 1.0.69",
  "tracing",
+ "wasip2",
  "wstd",
 ]
 

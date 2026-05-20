@@ -1532,7 +1532,7 @@ dependencies = [
 
 [[package]]
 name = "libp2p-wasi-sockets"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "futures",
@@ -1549,6 +1549,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "wasip2",
  "wasmtime",
  "wasmtime-wasi",
  "wstd",

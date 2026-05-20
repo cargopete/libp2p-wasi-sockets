@@ -1,0 +1,18 @@
+[package]
+name = "libp2p-wasi-sockets-dns"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# This crate is only ever built for wasm32-wasip2.
+# It tests DNS multiaddr resolution via WasiTcpTransport::dial.
+
+[[bin]]
+name = "dns"
+path = "src/main.rs"
+
+[dependencies]
+libp2p-wasi-sockets = { path = "../../.." }
+libp2p-core = { version = "0.43", default-features = false }
+wstd    = "0.6"
+futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }

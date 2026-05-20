@@ -6,17 +6,26 @@
 //!
 //! # Supported multiaddrs
 //!
-//! - `/ip4/<addr>/tcp/<port>`
-//! - `/ip4/<addr>/tcp/<port>/p2p/<peer-id>`
-//! - `/ip6/<addr>/tcp/<port>`
-//! - `/ip6/<addr>/tcp/<port>/p2p/<peer-id>`
+//! | Pattern | Supported |
+//! |---|---|
+//! | `/ip4/<addr>/tcp/<port>[/p2p/<peer-id>]` | ✅ |
+//! | `/ip6/<addr>/tcp/<port>[/p2p/<peer-id>]` | ✅ |
+//! | `/dns4/<host>/tcp/<port>` | ✅ resolved via `wasi:sockets/ip-name-lookup` |
+//! | `/dns6/<host>/tcp/<port>` | ✅ resolved (IPv6 TCP requires wstd ≥ next) |
+//! | `/dns/<host>/tcp/<port>` | ✅ first address of either family |
 //!
 //! # Not supported
 //!
-//! - `/dns4`, `/dns6`, `/dnsaddr` — DNS resolution via `wasi:sockets/ip-name-lookup` is a
-//!   planned follow-up.
+//! - `/dnsaddr` — TXT-record-based multiaddr discovery; out of scope.
 //! - `/quic-v1`, `/ws`, `/wss`, `/webrtc`, `/p2p-circuit` — out of scope.
-//! - UDP — out of scope for v0.1.
+//! - UDP — out of scope.
+//!
+//! # DNS permissions
+//!
+//! DNS resolution requires the WASI host to grant `ip-name-lookup` access.
+//! Under Wasmtime, pass `-S inherit-network` **and** add `allow_ip_name_lookup(true)`
+//! when constructing [`WasiCtxBuilder`] (it is disabled by default even with
+//! `inherit_network`).
 //!
 //! # Quick start
 //!
@@ -38,6 +47,7 @@
 
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code, unused_imports))]
 
+mod dns;
 mod error;
 mod multiaddr;
 mod stream;

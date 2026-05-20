@@ -10,7 +10,7 @@ use libp2p_core::Transport;
 use tracing::warn;
 
 use crate::error::Error;
-use crate::multiaddr::{multiaddr_to_socketaddr, socketaddr_to_multiaddr};
+use crate::multiaddr::{multiaddr_to_dial_target, multiaddr_to_socketaddr, socketaddr_to_multiaddr, DialTarget};
 use crate::stream::WasiTcpStream;
 
 /// Configuration for [`WasiTcpTransport`].
@@ -169,13 +169,27 @@ impl Transport for WasiTcpTransport {
         addr: Multiaddr,
         _opts: DialOpts,
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
-        let sock_addr = multiaddr_to_socketaddr(&addr).map_err(TransportError::Other)?;
-        let _ = &sock_addr; // used below only on wasm32
-
         #[cfg(target_arch = "wasm32")]
         {
+            let target = multiaddr_to_dial_target(&addr).map_err(TransportError::Other)?;
             let dial_fut: WasmBoxFut<Result<WasiTcpStream, Error>> =
                 Box::pin(async move {
+                    // Resolve DNS if needed.
+                    let sock_addr = match target {
+                        DialTarget::Addr(sa) => sa,
+                        DialTarget::Dns { host, port, family } => {
+                            crate::dns::resolve_host(&host, port, family).await?
+                        }
+                    };
+
+                    // wstd does not yet support IPv6 TCP (it calls todo!() internally).
+                    if sock_addr.is_ipv6() {
+                        return Err(Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::Unsupported,
+                            "IPv6 TCP is not yet supported (wstd limitation)",
+                        )));
+                    }
+
                     wstd::net::TcpStream::connect(sock_addr)
                         .await
                         .map(WasiTcpStream::new)

@@ -90,6 +90,22 @@ async fn run_component_with_env(
     wasm_path: &std::path::Path,
     env: &[(&str, &str)],
 ) -> Result<()> {
+    run_component_with_options(wasm_path, env, false).await
+}
+
+/// Like `run_component` but also enables `ip_name_lookup` (required for DNS).
+///
+/// DNS lookup is disabled by default in wasmtime-wasi even with `inherit_network`;
+/// this opt-in is required for components that resolve hostnames.
+async fn run_component_with_dns(wasm_path: &std::path::Path) -> Result<()> {
+    run_component_with_options(wasm_path, &[], true).await
+}
+
+async fn run_component_with_options(
+    wasm_path: &std::path::Path,
+    env: &[(&str, &str)],
+    allow_dns: bool,
+) -> Result<()> {
     let mut config = Config::new();
     config.wasm_component_model(true);
     // async_support is always-on in wasmtime ≥ 44; no call needed.
@@ -99,6 +115,9 @@ async fn run_component_with_env(
 
     let mut builder = WasiCtxBuilder::new();
     builder.inherit_stdio().inherit_network();
+    if allow_dns {
+        builder.allow_ip_name_lookup(true);
+    }
     for (k, v) in env {
         builder.env(k, v);
     }
@@ -338,4 +357,17 @@ async fn m5_interop() -> Result<()> {
     native_result.context("native echo handler failed")?;
 
     Ok(())
+}
+
+/// M7 — DNS multiaddr dial: `/dns4/localhost/tcp/<port>`.
+///
+/// Builds and runs `tests/component/dns/` under Wasmtime with
+/// `allow_ip_name_lookup` enabled.  The WASM component binds an ephemeral
+/// listener on `127.0.0.1`, then dials itself via `/dns4/localhost/tcp/<port>`.
+/// This exercises the full `wasi:sockets/ip-name-lookup` path inside
+/// `WasiTcpTransport::dial`.
+#[tokio::test]
+async fn m7_dns_dial() -> Result<()> {
+    let wasm = build_component("dns")?;
+    run_component_with_dns(&wasm).await
 }

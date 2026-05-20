@@ -26,7 +26,7 @@ This crate closes that gap.
 ### What is deliberately out of scope
 
 - **UDP / QUIC** — `wasi:sockets/udp` doesn't expose the socket controls `quinn` needs.
-- **DNS multiaddrs** — `/dns4`, `/dns6`, `/dnsaddr` planned for v0.2.
+- **`/dnsaddr`** — TXT-record-based multiaddr discovery; out of scope.
 - **Browser** — already covered by `libp2p-websocket-websys` / `libp2p-webtransport-websys`.
 - **NAT traversal** — AutoNAT, circuit-relay, DCUtR are not supported by the `wasi-sockets` API.
 
@@ -34,7 +34,7 @@ This crate closes that gap.
 
 ## Status
 
-**v0.1.0** — all milestones complete; full Noise XX + Yamux interop verified against native rust-libp2p.
+**v0.2.0** — DNS multiaddr support added.
 
 | Milestone | Description | Status |
 |---|---|---|
@@ -45,6 +45,7 @@ This crate closes that gap.
 | M4 | Noise XX + Yamux upgrade over `WasiTcpTransport` | ✅ |
 | M5 | Interop test: WASM component ↔ native rust-libp2p (tokio) | ✅ |
 | M6 | Docs polish, examples, 0.1.0 crates.io release | ✅ |
+| M7 | DNS multiaddr support: `/dns4`, `/dns6`, `/dns` via `wasi:sockets/ip-name-lookup` | ✅ |
 
 ---
 
@@ -53,7 +54,7 @@ This crate closes that gap.
 ```toml
 # Cargo.toml — do NOT enable the `tcp` feature on the umbrella `libp2p` crate
 [dependencies]
-libp2p-wasi-sockets = "0.1"
+libp2p-wasi-sockets = "0.2"
 libp2p-swarm        = "0.47"
 libp2p-noise        = "0.46"
 libp2p-yamux        = "0.47"
@@ -111,7 +112,10 @@ wasmtime run -S inherit-network ./target/wasm32-wasip2/release/my_app.wasm
 | `…/p2p/<peer-id>` suffix | ✅ stripped, not dialled |
 | `/ip4/0.0.0.0/tcp/0` (ephemeral port) | ✅ |
 | `/ip6/::/tcp/0` (ephemeral port) | ✅ |
-| `/dns4`, `/dns6`, `/dnsaddr` | ❌ planned for v0.2 |
+| `/dns4/<host>/tcp/<port>` | ✅ resolves via `wasi:sockets/ip-name-lookup` |
+| `/dns6/<host>/tcp/<port>` | ✅ resolved (IPv6 TCP requires wstd ≥ next) |
+| `/dns/<host>/tcp/<port>` | ✅ first address of either family |
+| `/dnsaddr` | ❌ TXT-record discovery; out of scope |
 | `/quic-v1`, `/ws`, `/wss`, `/webrtc` | ❌ out of scope |
 
 ---
@@ -173,6 +177,21 @@ wasmtime run -S inherit-network my_app.wasm
 # Grant only specific addresses (production)
 wasmtime run --wasi tcp=127.0.0.1:4001 my_app.wasm
 ```
+
+### DNS requires an explicit opt-in
+
+`inherit_network` does **not** enable hostname resolution. When embedding Wasmtime
+programmatically, call `allow_ip_name_lookup(true)` on `WasiCtxBuilder`:
+
+```rust
+let wasi = WasiCtxBuilder::new()
+    .inherit_network()
+    .allow_ip_name_lookup(true)  // required for /dns4, /dns6, /dns multiaddrs
+    .build();
+```
+
+Without it, any dial to a DNS multiaddr will fail with a `wasi:sockets/ip-name-lookup`
+permission error.
 
 ---
 

@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] — 2026-05-20
+
+### Added
+
+- **M7** — DNS multiaddr support: `WasiTcpTransport::dial` now resolves `/dns4/<host>`,
+  `/dns6/<host>`, and `/dns/<host>` multiaddrs via `wasi:sockets/ip-name-lookup`.
+  Resolution is fully async — the `ResolveAddressStream` pollable is driven through wstd's
+  `AsyncPollable` reactor with no blocking. Address-family filtering (`dns4` → IPv4 only,
+  `dns6` → IPv6 only) is applied before connecting. IPv6 TCP connections are guarded with
+  a clear error until wstd adds IPv6 connect support.
+  `wasip2` added as a `wasm32`-only dependency to access the raw WASI bindings.
+  Integration test: WASM component binds an ephemeral listener then dials itself via
+  `/dns4/localhost/tcp/<port>`, exercising the full resolution → connect path.
+
+### Notes
+
+- Wasmtime requires `allow_ip_name_lookup(true)` on `WasiCtxBuilder` for DNS to work;
+  `inherit_network()` alone is insufficient.
+- `/dnsaddr` (libp2p TXT-record-based multiaddr discovery) remains unsupported.
+
 ## [0.1.0] — 2026-05-17
 
 ### Added
