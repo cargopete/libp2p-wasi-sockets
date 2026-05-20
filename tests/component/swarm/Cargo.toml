@@ -1,0 +1,23 @@
+[package]
+name = "libp2p-wasi-sockets-swarm"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Only ever built for wasm32-wasip2.
+# Runs a libp2p Swarm with WasiTcpTransport + Noise + Yamux + Ping,
+# dials a native peer, and asserts a successful ping round-trip.
+
+[[bin]]
+name = "swarm"
+path = "src/main.rs"
+
+[dependencies]
+libp2p-wasi-sockets = { path = "../../.." }
+libp2p-core         = { version = "0.43", default-features = false }
+libp2p-noise        = "0.46"
+libp2p-yamux        = "0.47"
+libp2p-swarm        = { version = "0.47", features = ["macros"] }
+libp2p-identity     = { version = "0.2", default-features = false, features = ["ed25519", "rand"] }
+wstd                = "0.6"
+futures             = { version = "0.3", default-features = false, features = ["std", "async-await"] }

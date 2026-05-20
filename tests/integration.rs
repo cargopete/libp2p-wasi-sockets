@@ -371,3 +371,92 @@ async fn m7_dns_dial() -> Result<()> {
     let wasm = build_component("dns")?;
     run_component_with_dns(&wasm).await
 }
+
+/// M8 — libp2p Swarm over WasiTcpTransport.
+///
+/// Spins up a native Noise XX + Yamux listener, then runs
+/// `tests/component/swarm/` alongside it.  The WASM Swarm dials the native
+/// peer, verifies `ConnectionEstablished` fires for the correct peer ID, and
+/// exits cleanly.  Passing proves the full Swarm upgrade chain (Noise XX +
+/// Yamux + PeerId authentication) works on wasm32-wasip2.
+///
+/// Note: `libp2p_ping` is not used because `futures_timer` — its timer
+/// dependency — relies on a background thread that cannot be spawned in
+/// single-threaded wasm32-wasip2 under Wasmtime.
+#[tokio::test]
+async fn m8_swarm_connect() -> Result<()> {
+    use libp2p_core::upgrade::{InboundConnectionUpgrade, UpgradeInfo};
+    use libp2p_identity::Keypair;
+    use multistream_select::listener_select_proto;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+
+    // ── Native peer setup ─────────────────────────────────────────────────────
+    let native_key = Keypair::generate_ed25519();
+    let native_peer_id = native_key.public().to_peer_id();
+
+    let native_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let native_port = native_listener.local_addr()?.port();
+    let native_multiaddr: libp2p_core::Multiaddr =
+        format!("/ip4/127.0.0.1/tcp/{native_port}").parse().unwrap();
+
+    eprintln!("M8: native listener at {native_multiaddr}, peer_id={native_peer_id}");
+
+    // ── Build WASM swarm component ────────────────────────────────────────────
+    let wasm = build_component("swarm")?;
+
+    let env = [
+        ("NATIVE_ADDR".to_string(), native_multiaddr.to_string()),
+        ("NATIVE_PEER_ID".to_string(), native_peer_id.to_string()),
+    ];
+    let env_refs: Vec<(&str, &str)> =
+        env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
+
+    // ── Run WASM swarm and native handshake peer concurrently ─────────────────
+    let (wasm_result, native_result) = tokio::join!(
+        run_component_with_env(&wasm, &env_refs),
+        async move {
+            let (tcp_stream, _) = native_listener.accept().await.context("accept")?;
+            let compat = tcp_stream.compat();
+
+            // ── Noise XX (inbound/responder) ──────────────────────────────────
+            let noise_cfg =
+                libp2p_noise::Config::new(&native_key).context("native noise config")?;
+            let (noise_proto, negotiated) =
+                listener_select_proto(compat, noise_cfg.protocol_info())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("noise negotiation: {e}"))?;
+            let (_remote_peer_id, noise_stream) = noise_cfg
+                .upgrade_inbound(negotiated, noise_proto)
+                .await
+                .map_err(|e| anyhow::anyhow!("noise upgrade: {e}"))?;
+
+            // ── Yamux (inbound/responder) ─────────────────────────────────────
+            let yamux_cfg = libp2p_yamux::Config::default();
+            let (yamux_proto, negotiated2) =
+                listener_select_proto(noise_stream, yamux_cfg.protocol_info())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("yamux negotiation: {e}"))?;
+            let muxer = yamux_cfg
+                .upgrade_inbound(negotiated2, yamux_proto)
+                .await
+                .map_err(|e| anyhow::anyhow!("yamux upgrade: {e}"))?;
+
+            eprintln!("M8 native: handshake complete, closing connection");
+
+            // Drop the muxer immediately: this sends a yamux GoAway + TCP
+            // FIN.  The WASM side's TCP I/O pollable fires on EOF, which
+            // unblocks wstd's block_on() loop so the spawned connection tasks
+            // can run, see the closed channel, and exit cleanly — without the
+            // ~85 s deadlock caused by the reactor waiting for a pollable that
+            // never fires when both sides hold the connection open.
+            drop(muxer);
+            eprintln!("M8 native: done");
+            Ok::<(), anyhow::Error>(())
+        }
+    );
+
+    wasm_result.context("WASM swarm component failed")?;
+    native_result.context("native handshake peer failed")?;
+
+    Ok(())
+}
