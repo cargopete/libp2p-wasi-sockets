@@ -34,7 +34,7 @@ This crate closes that gap.
 
 ## Status
 
-**v0.2.0** — DNS multiaddr support added.
+**v0.2.0** — Full libp2p Swarm stack verified on wasm32-wasip2.
 
 | Milestone | Description | Status |
 |---|---|---|
@@ -46,6 +46,7 @@ This crate closes that gap.
 | M5 | Interop test: WASM component ↔ native rust-libp2p (tokio) | ✅ |
 | M6 | Docs polish, examples, 0.1.0 crates.io release | ✅ |
 | M7 | DNS multiaddr support: `/dns4`, `/dns6`, `/dns` via `wasi:sockets/ip-name-lookup` | ✅ |
+| M8 | libp2p `Swarm` + full upgrade chain (Noise XX + Yamux + PeerId auth) on wasip2 | ✅ |
 
 ---
 
@@ -55,34 +56,50 @@ This crate closes that gap.
 # Cargo.toml — do NOT enable the `tcp` feature on the umbrella `libp2p` crate
 [dependencies]
 libp2p-wasi-sockets = "0.2"
-libp2p-swarm        = "0.47"
+libp2p-core         = { version = "0.43", default-features = false }
 libp2p-noise        = "0.46"
 libp2p-yamux        = "0.47"
-libp2p-ping         = "0.47"
+libp2p-swarm        = "0.47"
 libp2p-identity     = { version = "0.2", features = ["ed25519", "rand"] }
 wstd                = "0.6"
+futures             = { version = "0.3", default-features = false, features = ["std", "async-await"] }
 ```
 
 ```rust
-use libp2p_swarm::{SwarmBuilder, SwarmEvent};
+use std::pin::Pin;
+use futures::StreamExt as _;
+use libp2p_core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version, Transport as _};
+use libp2p_identity::Keypair;
+use libp2p_swarm::{dummy, Config as SwarmConfig, Executor, Swarm, SwarmEvent};
 use libp2p_wasi_sockets::WasiTcpTransport;
-use std::time::Duration;
+
+struct WstdExecutor;
+impl Executor for WstdExecutor {
+    fn exec(&self, fut: Pin<Box<dyn std::future::Future<Output = ()> + Send>>) {
+        wstd::runtime::spawn(fut).detach();
+    }
+}
 
 #[wstd::main]
 async fn main() {
-    let keypair = libp2p_identity::Keypair::generate_ed25519();
-    let mut swarm = SwarmBuilder::with_existing_identity(keypair)
-        .with_other_transport(|_| WasiTcpTransport::default()).unwrap()
-        .with_behaviour(|_| libp2p_ping::Behaviour::default()).unwrap()
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(60)))
-        .build();
+    let keypair = Keypair::generate_ed25519();
+    let peer_id = keypair.public().to_peer_id();
+
+    let transport: Boxed<(_, StreamMuxerBox)> = WasiTcpTransport::default()
+        .upgrade(Version::V1)
+        .authenticate(libp2p_noise::Config::new(&keypair).unwrap())
+        .multiplex(libp2p_yamux::Config::default())
+        .boxed();
+
+    let mut swarm = Swarm::new(transport, dummy::Behaviour, peer_id,
+                               SwarmConfig::with_executor(WstdExecutor));
 
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap()).unwrap();
 
     loop {
         match swarm.select_next_some().await {
             SwarmEvent::NewListenAddr { address, .. } => eprintln!("listening on {address}"),
-            SwarmEvent::Behaviour(event) => eprintln!("{event:?}"),
+            SwarmEvent::ConnectionEstablished { peer_id, .. } => eprintln!("connected: {peer_id}"),
             _ => {}
         }
     }
@@ -156,6 +173,12 @@ wasmtime run -S inherit-network ./target/wasm32-wasip2/release/my_app.wasm
 ---
 
 ## Pitfalls
+
+### Behaviours that rely on `futures_timer` do not work
+
+Several libp2p behaviours (`libp2p-ping`, `libp2p-swarm`'s idle-connection timeout, etc.) use [`futures_timer`](https://crates.io/crates/futures-timer) internally. On `wasm32-wasip2`, `futures_timer` falls back to its **native** path, which tries to spawn a background timer thread. Thread spawning is not supported by the WASI component model, so the spawn fails silently, leaving a dead timer handle. Any future that polls a `futures_timer::Delay` then panics with "timer has gone away".
+
+The workaround is to avoid behaviours with timer dependencies (or wait for `futures_timer` to gain a WASI-compatible backend). For connection management, use `dummy::Behaviour` or any behaviour that does not poll `Delay` internally. Timer-free behaviours such as `libp2p-identify`, `libp2p-request-response` (when request-timeout is not used), and raw stream handlers work fine.
 
 ### Do not pull in `libp2p-tcp`
 
