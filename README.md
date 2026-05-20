@@ -34,7 +34,7 @@ This crate closes that gap.
 
 ## Status
 
-**v0.2.0** — Full libp2p Swarm stack verified on wasm32-wasip2.
+**v0.3.0** — `libp2p-ping` and timer-based behaviours verified on wasm32-wasip2.
 
 | Milestone | Description | Status |
 |---|---|---|
@@ -47,6 +47,7 @@ This crate closes that gap.
 | M6 | Docs polish, examples, 0.1.0 crates.io release | ✅ |
 | M7 | DNS multiaddr support: `/dns4`, `/dns6`, `/dns` via `wasi:sockets/ip-name-lookup` | ✅ |
 | M8 | libp2p `Swarm` + full upgrade chain (Noise XX + Yamux + PeerId auth) on wasip2 | ✅ |
+| M9 | `libp2p-ping` round-trip on wasip2 — WASI-native `futures_timer` via `wasi:clocks` | ✅ |
 
 ---
 
@@ -55,22 +56,31 @@ This crate closes that gap.
 ```toml
 # Cargo.toml — do NOT enable the `tcp` feature on the umbrella `libp2p` crate
 [dependencies]
-libp2p-wasi-sockets = "0.2"
+libp2p-wasi-sockets = "0.3"
 libp2p-core         = { version = "0.43", default-features = false }
 libp2p-noise        = "0.46"
 libp2p-yamux        = "0.47"
+libp2p-ping         = "0.47"
 libp2p-swarm        = "0.47"
 libp2p-identity     = { version = "0.2", features = ["ed25519", "rand"] }
 wstd                = "0.6"
 futures             = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+
+# Replace the thread-spawning futures-timer with the WASI-native version.
+# Required for any behaviour that uses futures_timer::Delay (ping, swarm
+# idle timeout, etc.).  See crates/futures-timer-wasi in the libp2p-wasi-sockets
+# repository, or vendor your own.
+[patch.crates-io]
+futures-timer = { git = "https://github.com/cargopete/libp2p-wasi-sockets", tag = "v0.3.0", package = "futures-timer" }
 ```
 
 ```rust
 use std::pin::Pin;
+use std::time::Duration;
 use futures::StreamExt as _;
 use libp2p_core::{muxing::StreamMuxerBox, transport::Boxed, upgrade::Version, Transport as _};
 use libp2p_identity::Keypair;
-use libp2p_swarm::{dummy, Config as SwarmConfig, Executor, Swarm, SwarmEvent};
+use libp2p_swarm::{Config as SwarmConfig, Executor, Swarm, SwarmEvent};
 use libp2p_wasi_sockets::WasiTcpTransport;
 
 struct WstdExecutor;
@@ -91,15 +101,21 @@ async fn main() {
         .multiplex(libp2p_yamux::Config::default())
         .boxed();
 
-    let mut swarm = Swarm::new(transport, dummy::Behaviour, peer_id,
+    let behaviour = libp2p_ping::Behaviour::new(
+        libp2p_ping::Config::new().with_interval(Duration::from_secs(15)),
+    );
+    let mut swarm = Swarm::new(transport, behaviour, peer_id,
                                SwarmConfig::with_executor(WstdExecutor));
 
-    swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse().unwrap()).unwrap();
+    swarm.dial("/ip4/1.2.3.4/tcp/4001".parse().unwrap()).unwrap();
 
     loop {
         match swarm.select_next_some().await {
-            SwarmEvent::NewListenAddr { address, .. } => eprintln!("listening on {address}"),
             SwarmEvent::ConnectionEstablished { peer_id, .. } => eprintln!("connected: {peer_id}"),
+            SwarmEvent::Behaviour(libp2p_ping::Event { peer, result: Ok(rtt), .. }) => {
+                eprintln!("ping {peer}: {rtt:?}");
+            }
+            SwarmEvent::ConnectionClosed { .. } => break,
             _ => {}
         }
     }
@@ -174,11 +190,11 @@ wasmtime run -S inherit-network ./target/wasm32-wasip2/release/my_app.wasm
 
 ## Pitfalls
 
-### Behaviours that rely on `futures_timer` do not work
+### Behaviours that rely on `futures_timer` need a WASI-compatible patch
 
-Several libp2p behaviours (`libp2p-ping`, `libp2p-swarm`'s idle-connection timeout, etc.) use [`futures_timer`](https://crates.io/crates/futures-timer) internally. On `wasm32-wasip2`, `futures_timer` falls back to its **native** path, which tries to spawn a background timer thread. Thread spawning is not supported by the WASI component model, so the spawn fails silently, leaving a dead timer handle. Any future that polls a `futures_timer::Delay` then panics with "timer has gone away".
+Several libp2p behaviours (`libp2p-ping`, `libp2p-swarm`'s idle-connection timeout, etc.) use [`futures_timer`](https://crates.io/crates/futures-timer) internally. On `wasm32-wasip2`, the upstream `futures_timer` crate falls back to its **native** path, which tries to spawn a background timer thread. Thread spawning is not supported by the WASI component model, so the spawn fails silently and any future that polls a `Delay` panics with "timer has gone away".
 
-The workaround is to avoid behaviours with timer dependencies (or wait for `futures_timer` to gain a WASI-compatible backend). For connection management, use `dummy::Behaviour` or any behaviour that does not poll `Delay` internally. Timer-free behaviours such as `libp2p-identify`, `libp2p-request-response` (when request-timeout is not used), and raw stream handlers work fine.
+**The fix**: patch `futures_timer` with a WASI-native implementation that uses `wasi:clocks/monotonic-clock::subscribe_duration` instead of a background thread. This crate ships `crates/futures-timer-wasi/` for exactly this purpose — add it to your `[patch.crates-io]` as shown in the Quick Start above.
 
 ### Do not pull in `libp2p-tcp`
 

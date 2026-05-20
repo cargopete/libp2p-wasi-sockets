@@ -372,6 +372,219 @@ async fn m7_dns_dial() -> Result<()> {
     run_component_with_dns(&wasm).await
 }
 
+/// M9 — libp2p Ping round-trip over WasiTcpTransport.
+///
+/// Demonstrates that `futures_timer`-based behaviours work on wasm32-wasip2
+/// after patching `futures-timer` with a WASI-native implementation backed by
+/// `wasi:clocks/monotonic-clock`.
+///
+/// Native side: Noise XX + Yamux inbound, then accepts the ping substream
+/// (`/ipfs/ping/1.0.0`), echoes the 32-byte payload, and drops the connection.
+/// WASM side: full `libp2p_ping::Behaviour` Swarm, breaks on first RTT.
+#[tokio::test]
+async fn m9_ping() -> Result<()> {
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    use futures::future::poll_fn;
+    use futures::io::{AsyncRead, AsyncWrite};
+    use libp2p_core::muxing::StreamMuxer;
+    use libp2p_core::upgrade::{InboundConnectionUpgrade, UpgradeInfo};
+    use libp2p_identity::Keypair;
+    use multistream_select::listener_select_proto;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+
+    let native_key = Keypair::generate_ed25519();
+    let native_peer_id = native_key.public().to_peer_id();
+
+    let native_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let native_port = native_listener.local_addr()?.port();
+    let native_multiaddr: libp2p_core::Multiaddr =
+        format!("/ip4/127.0.0.1/tcp/{native_port}").parse().unwrap();
+
+    eprintln!("M9: native listener at {native_multiaddr}, peer_id={native_peer_id}");
+
+    let wasm = build_component("ping")?;
+
+    let env = [
+        ("NATIVE_ADDR".to_string(), native_multiaddr.to_string()),
+        ("NATIVE_PEER_ID".to_string(), native_peer_id.to_string()),
+    ];
+    let env_refs: Vec<(&str, &str)> =
+        env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
+
+    let (wasm_result, native_result) = tokio::join!(
+        run_component_with_env(&wasm, &env_refs),
+        async move {
+            let (tcp_stream, _) = native_listener.accept().await.context("accept")?;
+            let compat = tcp_stream.compat();
+
+            // Noise XX inbound
+            let noise_cfg =
+                libp2p_noise::Config::new(&native_key).context("native noise config")?;
+            let (noise_proto, negotiated) =
+                listener_select_proto(compat, noise_cfg.protocol_info())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("noise negotiation: {e}"))?;
+            let (_remote_peer_id, noise_stream) = noise_cfg
+                .upgrade_inbound(negotiated, noise_proto)
+                .await
+                .map_err(|e| anyhow::anyhow!("noise upgrade: {e}"))?;
+
+            // Yamux inbound
+            let yamux_cfg = libp2p_yamux::Config::default();
+            let (yamux_proto, negotiated2) =
+                listener_select_proto(noise_stream, yamux_cfg.protocol_info())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("yamux negotiation: {e}"))?;
+            let mut muxer = yamux_cfg
+                .upgrade_inbound(negotiated2, yamux_proto)
+                .await
+                .map_err(|e| anyhow::anyhow!("yamux upgrade: {e}"))?;
+
+            eprintln!("M9 native: handshake complete, waiting for ping substream");
+
+            // State for the ping responder state machine.
+            // Using poll_fn so we can drive the yamux muxer alongside the
+            // substream operations (yamux needs its connection polled to
+            // process frames and deliver data to open streams).
+            type NegFut = Pin<Box<dyn std::future::Future<
+                Output = std::result::Result<
+                    (&'static str, multistream_select::Negotiated<libp2p_yamux::Stream>),
+                    multistream_select::NegotiationError,
+                >,
+            >>>;
+
+            let mut stream_opt: Option<libp2p_yamux::Stream> = None;
+            let mut neg_fut: Option<NegFut> = None;
+            let mut neg_stream: Option<
+                multistream_select::Negotiated<libp2p_yamux::Stream>,
+            > = None;
+            let mut ping_buf = [0u8; 32];
+            let mut read_pos: usize = 0;
+            let mut written: usize = 0;
+            let mut flushed = false;
+
+            poll_fn(|cx| {
+                // Step 1: accept inbound Yamux stream.
+                if stream_opt.is_none() && neg_fut.is_none() && neg_stream.is_none() {
+                    match Pin::new(&mut muxer).poll_inbound(cx) {
+                        Poll::Ready(Ok(s)) => stream_opt = Some(s),
+                        Poll::Ready(Err(e)) => {
+                            return Poll::Ready(Err(anyhow::anyhow!("poll_inbound: {e}")))
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+
+                // Step 2: kick off /ipfs/ping/1.0.0 negotiation.
+                if neg_fut.is_none() && neg_stream.is_none() {
+                    if let Some(stream) = stream_opt.take() {
+                        neg_fut = Some(Box::pin(listener_select_proto(
+                            stream,
+                            std::iter::once("/ipfs/ping/1.0.0"),
+                        )));
+                    }
+                }
+
+                // Step 3: drive negotiation future.
+                if let Some(fut) = neg_fut.as_mut() {
+                    match fut.as_mut().poll(cx) {
+                        Poll::Ready(Ok((_proto, ns))) => {
+                            neg_stream = Some(ns);
+                            neg_fut = None;
+                        }
+                        Poll::Ready(Err(e)) => {
+                            return Poll::Ready(Err(anyhow::anyhow!("ping negotiation: {e}")))
+                        }
+                        Poll::Pending => {
+                            let _ = Pin::new(&mut muxer).poll_inbound(cx);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+
+                let Some(ns) = neg_stream.as_mut() else {
+                    return Poll::Pending;
+                };
+
+                // Step 4: read the 32-byte ping payload.
+                while read_pos < 32 {
+                    match Pin::new(&mut *ns).poll_read(cx, &mut ping_buf[read_pos..]) {
+                        Poll::Ready(Ok(0)) => {
+                            return Poll::Ready(Err(anyhow::anyhow!("unexpected EOF reading ping")))
+                        }
+                        Poll::Ready(Ok(n)) => read_pos += n,
+                        Poll::Ready(Err(e)) => {
+                            return Poll::Ready(Err(anyhow::anyhow!("ping read: {e}")))
+                        }
+                        Poll::Pending => {
+                            let _ = Pin::new(&mut muxer).poll_inbound(cx);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+
+                // Step 5: echo it back.
+                while written < 32 {
+                    match Pin::new(&mut *ns).poll_write(cx, &ping_buf[written..]) {
+                        Poll::Ready(Ok(n)) => written += n,
+                        Poll::Ready(Err(e)) => {
+                            return Poll::Ready(Err(anyhow::anyhow!("ping write: {e}")))
+                        }
+                        Poll::Pending => {
+                            let _ = Pin::new(&mut muxer).poll_inbound(cx);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+
+                // Step 6: flush.
+                if !flushed {
+                    match Pin::new(&mut *ns).poll_flush(cx) {
+                        Poll::Ready(Ok(())) => flushed = true,
+                        Poll::Ready(Err(e)) => {
+                            return Poll::Ready(Err(anyhow::anyhow!("ping flush: {e}")))
+                        }
+                        Poll::Pending => {
+                            let _ = Pin::new(&mut muxer).poll_inbound(cx);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+
+                // Step 7: drive the muxer until the remote closes the connection.
+                // This is critical: poll_flush only flushes the stream's buffer
+                // into yamux's connection-level send buffer.  The connection
+                // must continue to be polled so that yamux can write those
+                // frames to TCP and the WASM side actually receives the echo.
+                // The WASM side closes the connection after it processes the
+                // ping RTT (main() returns, swarm drops, TCP FIN sent).
+                match Pin::new(&mut muxer).poll_inbound(cx) {
+                    Poll::Ready(Err(_)) => {
+                        eprintln!("M9 native: ping echo sent, connection closed by remote");
+                        Poll::Ready(Ok::<(), anyhow::Error>(()))
+                    }
+                    Poll::Ready(Ok(s)) => {
+                        drop(s); // unexpected extra stream, ignore
+                        Poll::Pending
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await?;
+
+            drop(muxer);
+            eprintln!("M9 native: done");
+            Ok::<(), anyhow::Error>(())
+        }
+    );
+
+    wasm_result.context("WASM ping component failed")?;
+    native_result.context("native ping responder failed")?;
+    Ok(())
+}
+
 /// M8 — libp2p Swarm over WasiTcpTransport.
 ///
 /// Spins up a native Noise XX + Yamux listener, then runs
