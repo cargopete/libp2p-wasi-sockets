@@ -54,6 +54,8 @@ This crate closes that gap.
 | M13 | `libp2p-gossipsub` pub/sub — two WASM components exchange a gossipsub message | ✅ |
 | M14 | `libp2p-kad` Kademlia DHT — WASM provider stores a record, WASM seeker retrieves it | ✅ |
 | M15 | crates.io release v0.5.0 | ✅ |
+| M16 | CI improvements — Cargo + WASM component caching, semver-tag publish job | ✅ |
+| M17 | `libp2p-request-response` — two WASM components exchange a ping/pong request-response | ✅ |
 
 ---
 

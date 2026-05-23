@@ -1,0 +1,29 @@
+[package]
+name = "libp2p-wasi-sockets-req-resp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Only ever built for wasm32-wasip2.
+# A single binary that runs as either a server or client depending on MODE:
+#   MODE=server — binds on LISTEN_PORT, responds to any request with b"pong"
+#   MODE=client — dials SERVER_ADDR, sends b"ping", asserts response == b"pong"
+
+[[bin]]
+name = "req-resp"
+path = "src/main.rs"
+
+[dependencies]
+libp2p-wasi-sockets        = { path = "../../.." }
+libp2p-core                = { version = "0.43", default-features = false }
+libp2p-noise               = "0.46"
+libp2p-yamux               = "0.47"
+libp2p-swarm               = { version = "0.47", features = ["macros"] }
+libp2p-request-response    = "0.29"
+libp2p-identity            = { version = "0.2", default-features = false, features = ["ed25519", "rand"] }
+wstd                       = "0.6"
+futures                    = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+async-trait                = "0.1"
+
+[patch.crates-io]
+futures-timer = { path = "../../../crates/futures-timer-wasi" }

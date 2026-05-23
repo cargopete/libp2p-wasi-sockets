@@ -724,6 +724,40 @@ async fn m11_listener() -> Result<()> {
     Ok(())
 }
 
+/// M17 — libp2p request-response over WasiTcpTransport: WASM-to-WASM ping/pong.
+///
+/// Two wasm32-wasip2 components (same binary, different `MODE` env var) run a
+/// simple request-response exchange using a length-prefixed codec over
+/// `/ping-pong/1.0.0`.  The server responds to every request with b"pong"; the
+/// client sends b"ping" and asserts the response.
+#[tokio::test]
+async fn m17_req_resp() -> Result<()> {
+    let tmp = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let wasm_port = tmp.local_addr()?.port();
+    drop(tmp);
+
+    let wasm = build_component("req-resp")?;
+
+    let server_addr = format!("/ip4/127.0.0.1/tcp/{wasm_port}");
+    let port_str = wasm_port.to_string();
+    eprintln!("M17: request-response server on {server_addr}");
+
+    let server_env = [("MODE", "server"), ("LISTEN_PORT", port_str.as_str())];
+    let client_env = [("MODE", "client"), ("SERVER_ADDR", server_addr.as_str())];
+
+    let (server_result, client_result) = tokio::join!(
+        run_component_with_env(&wasm, &server_env),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            run_component_with_env(&wasm, &client_env).await
+        },
+    );
+
+    server_result.context("WASM req-resp server failed")?;
+    client_result.context("WASM req-resp client failed")?;
+    Ok(())
+}
+
 /// M14 — libp2p Kademlia DHT over WasiTcpTransport: WASM-to-WASM record lookup.
 ///
 /// Two gossipsub peers run as wasm32-wasip2 components (same binary, different
