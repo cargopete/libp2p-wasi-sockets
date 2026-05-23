@@ -34,7 +34,7 @@ This crate closes that gap.
 
 ## Status
 
-**v0.5.0** — WASM-to-WASM connections and `libp2p-gossipsub` pub/sub verified on wasm32-wasip2.
+**v0.6.0** — `libp2p-request-response` WASM-to-WASM verified; CI gains caching and automated crates.io publish on semver tags.
 
 | Milestone | Description | Status |
 |---|---|---|
@@ -64,7 +64,7 @@ This crate closes that gap.
 ```toml
 # Cargo.toml — do NOT enable the `tcp` feature on the umbrella `libp2p` crate
 [dependencies]
-libp2p-wasi-sockets = "0.3"
+libp2p-wasi-sockets = "0.6"
 libp2p-core         = { version = "0.43", default-features = false }
 libp2p-noise        = "0.46"
 libp2p-yamux        = "0.47"
@@ -79,7 +79,7 @@ futures             = { version = "0.3", default-features = false, features = ["
 # idle timeout, etc.).  See crates/futures-timer-wasi in the libp2p-wasi-sockets
 # repository, or vendor your own.
 [patch.crates-io]
-futures-timer = { git = "https://github.com/cargopete/libp2p-wasi-sockets", tag = "v0.3.0", package = "futures-timer" }
+futures-timer = { git = "https://github.com/cargopete/libp2p-wasi-sockets", tag = "v0.6.0", package = "futures-timer" }
 ```
 
 ```rust
