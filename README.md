@@ -34,7 +34,7 @@ This crate closes that gap.
 
 ## Status
 
-**v0.6.0** — `libp2p-request-response` WASM-to-WASM verified; CI gains caching and automated crates.io publish on semver tags.
+**v0.6.0** — `libp2p-request-response` and `libp2p-rendezvous` verified on wasm32-wasip2; CI gains caching and automated crates.io publish on semver tags.
 
 | Milestone | Description | Status |
 |---|---|---|
@@ -53,7 +53,7 @@ This crate closes that gap.
 | M12 | WASM-to-WASM — two Wasm components connect directly, no native peer involved | ✅ |
 | M13 | `libp2p-gossipsub` pub/sub — two WASM components exchange a gossipsub message | ✅ |
 | M14 | `libp2p-kad` Kademlia DHT — WASM provider stores a record, WASM seeker retrieves it | ✅ |
-| M15 | crates.io release v0.5.0 | ✅ |
+| M15 | crates.io release v0.5.0 → v0.6.0 | ✅ |
 | M16 | CI improvements — Cargo + WASM component caching, semver-tag publish job | ✅ |
 | M17 | `libp2p-request-response` — two WASM components exchange a ping/pong request-response | ✅ |
 | M18 | `libp2p-rendezvous` — WASM client registers + discovers peers via a native rendezvous server | ✅ |
