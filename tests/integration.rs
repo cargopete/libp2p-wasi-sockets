@@ -724,6 +724,82 @@ async fn m11_listener() -> Result<()> {
     Ok(())
 }
 
+/// M12 — WASM-to-WASM direct connection: two Wasm components, no native peer.
+///
+/// Both the listener (`p2p-listener`) and dialer (`p2p-dialer`) are
+/// wasm32-wasip2 components running in separate Wasmtime instances on the same
+/// host.  The connection goes through the host's loopback TCP stack — no native
+/// libp2p is involved in the handshake itself.
+///
+/// Port coordination: bind-0 trick on the native side to find a free port, pass
+/// it to the listener via `LISTEN_PORT`, then start the dialer 300 ms later via
+/// `DIAL_ADDR`.
+#[tokio::test]
+async fn m12_wasm_wasm() -> Result<()> {
+    let tmp = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let wasm_port = tmp.local_addr()?.port();
+    drop(tmp);
+
+    let wasm_listener = build_component("p2p-listener")?;
+    let wasm_dialer = build_component("p2p-dialer")?;
+
+    let dial_addr = format!("/ip4/127.0.0.1/tcp/{wasm_port}");
+    let port_str = wasm_port.to_string();
+    eprintln!("M12: WASM listener on {dial_addr}");
+
+    let listen_env = [("LISTEN_PORT", port_str.as_str())];
+    let dial_env = [("DIAL_ADDR", dial_addr.as_str())];
+
+    let (listener_result, dialer_result) = tokio::join!(
+        run_component_with_env(&wasm_listener, &listen_env),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            run_component_with_env(&wasm_dialer, &dial_env).await
+        },
+    );
+
+    listener_result.context("WASM p2p-listener failed")?;
+    dialer_result.context("WASM p2p-dialer failed")?;
+    Ok(())
+}
+
+/// M13 — libp2p gossipsub over WasiTcpTransport: WASM-to-WASM pubsub.
+///
+/// Two gossipsub peers run as wasm32-wasip2 components (same binary, different
+/// `MODE` env var).  The publisher dials the listener, waits for the listener's
+/// `Subscribed` event on `/test/1.0.0`, then publishes b"hello M13".  The
+/// listener asserts the message arrives with the correct payload.
+///
+/// `flood_publish = true` and a 100 ms heartbeat ensure delivery in a 2-peer
+/// scenario without needing full mesh formation.
+#[tokio::test]
+async fn m13_gossipsub() -> Result<()> {
+    let tmp = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let wasm_port = tmp.local_addr()?.port();
+    drop(tmp);
+
+    let wasm = build_component("gossipsub")?;
+
+    let dial_addr = format!("/ip4/127.0.0.1/tcp/{wasm_port}");
+    let port_str = wasm_port.to_string();
+    eprintln!("M13: gossipsub listener on {dial_addr}");
+
+    let listen_env = [("MODE", "listen"), ("LISTEN_PORT", port_str.as_str())];
+    let publish_env = [("MODE", "publish"), ("DIAL_ADDR", dial_addr.as_str())];
+
+    let (listener_result, publisher_result) = tokio::join!(
+        run_component_with_env(&wasm, &listen_env),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            run_component_with_env(&wasm, &publish_env).await
+        },
+    );
+
+    listener_result.context("WASM gossipsub-listener failed")?;
+    publisher_result.context("WASM gossipsub-publisher failed")?;
+    Ok(())
+}
+
 /// M9 — libp2p Ping round-trip over WasiTcpTransport.
 ///
 /// Demonstrates that `futures_timer`-based behaviours work on wasm32-wasip2

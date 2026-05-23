@@ -1,0 +1,24 @@
+[package]
+name = "libp2p-wasi-sockets-p2p-listener"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Only ever built for wasm32-wasip2.
+# Binds a TCP listener via WasiTcpTransport and accepts the first inbound Swarm
+# connection from ANY peer (no peer-ID verification).  One half of the M12
+# WASM-to-WASM direct-connection test.
+
+[[bin]]
+name = "p2p-listener"
+path = "src/main.rs"
+
+[dependencies]
+libp2p-wasi-sockets = { path = "../../.." }
+libp2p-core         = { version = "0.43", default-features = false }
+libp2p-noise        = "0.46"
+libp2p-yamux        = "0.47"
+libp2p-swarm        = { version = "0.47", features = ["macros"] }
+libp2p-identity     = { version = "0.2", default-features = false, features = ["ed25519", "rand"] }
+wstd                = "0.6"
+futures             = { version = "0.3", default-features = false, features = ["std", "async-await"] }
