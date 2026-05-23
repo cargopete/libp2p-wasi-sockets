@@ -724,6 +724,41 @@ async fn m11_listener() -> Result<()> {
     Ok(())
 }
 
+/// M14 — libp2p Kademlia DHT over WasiTcpTransport: WASM-to-WASM record lookup.
+///
+/// Two gossipsub peers run as wasm32-wasip2 components (same binary, different
+/// `MODE` env var).  The provider pre-stores record `("kad-key", b"hello M14")`
+/// in its local MemoryStore, then serves the seeker's GET_VALUE query
+/// automatically via the Kademlia behaviour.  The seeker asserts the correct
+/// value after `get_record` completes.
+#[tokio::test]
+async fn m14_kad() -> Result<()> {
+    let tmp = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let wasm_port = tmp.local_addr()?.port();
+    drop(tmp);
+
+    let wasm = build_component("kad")?;
+
+    let provider_addr = format!("/ip4/127.0.0.1/tcp/{wasm_port}");
+    let port_str = wasm_port.to_string();
+    eprintln!("M14: Kademlia provider on {provider_addr}");
+
+    let provide_env = [("MODE", "provide"), ("LISTEN_PORT", port_str.as_str())];
+    let seek_env = [("MODE", "seek"), ("PROVIDER_ADDR", provider_addr.as_str())];
+
+    let (provider_result, seeker_result) = tokio::join!(
+        run_component_with_env(&wasm, &provide_env),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            run_component_with_env(&wasm, &seek_env).await
+        },
+    );
+
+    provider_result.context("WASM Kademlia provider failed")?;
+    seeker_result.context("WASM Kademlia seeker failed")?;
+    Ok(())
+}
+
 /// M12 — WASM-to-WASM direct connection: two Wasm components, no native peer.
 ///
 /// Both the listener (`p2p-listener`) and dialer (`p2p-dialer`) are

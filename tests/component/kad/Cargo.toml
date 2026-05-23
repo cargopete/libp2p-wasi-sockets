@@ -1,0 +1,30 @@
+[package]
+name = "libp2p-wasi-sockets-kad"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Only ever built for wasm32-wasip2.
+# Runs libp2p-kad (Kademlia DHT) over WasiTcpTransport.
+# MODE=provide — listens on LISTEN_PORT, pre-stores a record, serves the
+#               seeker's GET_VALUE query, exits after the seeker disconnects.
+# MODE=seek    — dials PROVIDER_ADDR, calls get_record("kad-key"), asserts
+#               the value is b"hello M14".
+
+[[bin]]
+name = "kad"
+path = "src/main.rs"
+
+[dependencies]
+libp2p-wasi-sockets = { path = "../../.." }
+libp2p-core         = { version = "0.43", default-features = false }
+libp2p-noise        = "0.46"
+libp2p-yamux        = "0.47"
+libp2p-swarm        = { version = "0.47", features = ["macros"] }
+libp2p-kad          = "0.48"
+libp2p-identity     = { version = "0.2", default-features = false, features = ["ed25519", "rand"] }
+wstd                = "0.6"
+futures             = { version = "0.3", default-features = false, features = ["std", "async-await"] }
+
+[patch.crates-io]
+futures-timer = { path = "../../../crates/futures-timer-wasi" }

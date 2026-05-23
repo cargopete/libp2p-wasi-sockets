@@ -52,6 +52,7 @@ This crate closes that gap.
 | M11 | Inbound connections — Wasm component acts as TCP listener, native peer dials in | ✅ |
 | M12 | WASM-to-WASM — two Wasm components connect directly, no native peer involved | ✅ |
 | M13 | `libp2p-gossipsub` pub/sub — two WASM components exchange a gossipsub message | ✅ |
+| M14 | `libp2p-kad` Kademlia DHT — WASM provider stores a record, WASM seeker retrieves it | ✅ |
 
 ---
 
