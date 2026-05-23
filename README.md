@@ -56,6 +56,7 @@ This crate closes that gap.
 | M15 | crates.io release v0.5.0 | ✅ |
 | M16 | CI improvements — Cargo + WASM component caching, semver-tag publish job | ✅ |
 | M17 | `libp2p-request-response` — two WASM components exchange a ping/pong request-response | ✅ |
+| M18 | `libp2p-rendezvous` — WASM client registers + discovers peers via a native rendezvous server | ✅ |
 
 ---
 

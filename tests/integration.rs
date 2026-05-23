@@ -758,6 +758,104 @@ async fn m17_req_resp() -> Result<()> {
     Ok(())
 }
 
+// ── Rendezvous server helper for M18 ─────────────────────────────────────────
+
+/// Spin up a native Tokio-based rendezvous server and return its listen addr.
+///
+/// The server keeps running in a background `tokio::spawn` task for the
+/// lifetime of the test.  Registrations are stored in memory so a sequential
+/// register → discover flow works without any extra synchronisation.
+async fn start_rendezvous_server() -> Result<libp2p_core::Multiaddr> {
+    use std::pin::Pin;
+
+    use futures::StreamExt as _;
+    use libp2p_core::Transport as _;
+    use libp2p_core::upgrade::Version;
+    use libp2p_identity::Keypair;
+    use libp2p_swarm::{Config as SwarmConfig, Swarm, SwarmEvent};
+
+    let keypair = Keypair::generate_ed25519();
+    let peer_id = keypair.public().to_peer_id();
+
+    let transport = libp2p_tcp::tokio::Transport::new(libp2p_tcp::Config::default())
+        .upgrade(Version::V1)
+        .authenticate(libp2p_noise::Config::new(&keypair)?)
+        .multiplex(libp2p_yamux::Config::default())
+        .boxed();
+
+    struct TokioExec;
+    impl libp2p_swarm::Executor for TokioExec {
+        fn exec(&self, f: Pin<Box<dyn std::future::Future<Output = ()> + Send>>) {
+            tokio::spawn(f);
+        }
+    }
+
+    let mut swarm = Swarm::new(
+        transport,
+        libp2p_rendezvous::server::Behaviour::new(libp2p_rendezvous::server::Config::default()),
+        peer_id,
+        SwarmConfig::with_executor(TokioExec),
+    );
+
+    swarm.listen_on("/ip4/127.0.0.1/tcp/0".parse()?)?;
+
+    let listen_addr = loop {
+        match swarm.select_next_some().await {
+            SwarmEvent::NewListenAddr { address, .. } => break address,
+            _ => {}
+        }
+    };
+
+    eprintln!("M18: rendezvous server at {listen_addr} (peer_id={peer_id})");
+
+    tokio::spawn(async move {
+        loop {
+            let _ = swarm.next().await;
+        }
+    });
+
+    Ok(listen_addr)
+}
+
+/// M18 — libp2p-rendezvous over WasiTcpTransport: WASM register + discover.
+///
+/// A native Tokio rendezvous server runs in the background.  First a WASM
+/// `register` component dials it and registers under the "wasm-peers"
+/// namespace; once confirmed, a WASM `discover` component dials the same
+/// server and asserts it finds at least one registration.  Passing proves the
+/// full rendezvous client protocol works end-to-end on wasm32-wasip2.
+#[tokio::test]
+async fn m18_rendezvous() -> Result<()> {
+    // Native rendezvous server — stays alive in a background task.
+    let server_addr = start_rendezvous_server().await?;
+    let server_str = server_addr.to_string();
+
+    // Free port for the registrant's listener (needed to populate PeerRecord).
+    let tmp = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let reg_port = tmp.local_addr()?.port();
+    drop(tmp);
+
+    let wasm = build_component("rendezvous")?;
+
+    // Step 1: register.
+    let reg_env = [
+        ("MODE", "register"),
+        ("SERVER_ADDR", server_str.as_str()),
+        ("LISTEN_PORT", &reg_port.to_string()),
+    ];
+    run_component_with_env(&wasm, &reg_env)
+        .await
+        .context("WASM rendezvous registrant failed")?;
+
+    // Step 2: discover (sequential — server holds the registration in memory).
+    let disc_env = [("MODE", "discover"), ("SERVER_ADDR", server_str.as_str())];
+    run_component_with_env(&wasm, &disc_env)
+        .await
+        .context("WASM rendezvous discoverer failed")?;
+
+    Ok(())
+}
+
 /// M14 — libp2p Kademlia DHT over WasiTcpTransport: WASM-to-WASM record lookup.
 ///
 /// Two gossipsub peers run as wasm32-wasip2 components (same binary, different

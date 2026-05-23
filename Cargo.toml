@@ -42,6 +42,8 @@ tokio-util         = { version = "0.7", features = ["compat"] }
 wasmtime           = "44"
 wasmtime-wasi      = "44"
 tokio              = { version = "1", features = ["macros", "rt-multi-thread", "process", "net", "time"] }
+libp2p-tcp         = { version = "0.43", features = ["tokio"] }
+libp2p-rendezvous  = "0.17"
 
 [lib]
 crate-type = ["rlib"]
