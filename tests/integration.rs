@@ -372,6 +372,358 @@ async fn m7_dns_dial() -> Result<()> {
     run_component_with_dns(&wasm).await
 }
 
+// ── Protobuf / multistream helpers for M10 ───────────────────────────────────
+
+/// Append a protobuf length-delimited field (wire type 2) to `buf`.
+fn proto_bytes(buf: &mut Vec<u8>, field: u32, data: &[u8]) {
+    proto_varint(buf, (field as u64) << 3 | 2);
+    proto_varint(buf, data.len() as u64);
+    buf.extend_from_slice(data);
+}
+
+/// Append an unsigned varint to `buf` (compatible with both protobuf and
+/// `unsigned_varint` / the libp2p length-prefix format).
+fn proto_varint(buf: &mut Vec<u8>, mut v: u64) {
+    loop {
+        if v < 0x80 {
+            buf.push(v as u8);
+            return;
+        }
+        buf.push((v as u8) | 0x80);
+        v >>= 7;
+    }
+}
+
+/// Build a length-prefixed `Identify` protobuf message for the native peer.
+///
+/// Fields:
+///   1 = publicKey  (protobuf-encoded ed25519 key)
+///   3 = protocols  (repeated string)
+///   4 = observedAddr (multiaddr bytes — /ip4/127.0.0.1/tcp/0 placeholder)
+///   5 = protocolVersion
+///   6 = agentVersion
+fn build_identify_frame(keypair: &libp2p_identity::Keypair) -> Vec<u8> {
+    let pub_key = keypair.public().encode_protobuf();
+
+    let mut msg = Vec::new();
+    proto_bytes(&mut msg, 1, &pub_key);
+    proto_bytes(&mut msg, 3, b"/ipfs/id/1.0.0");
+    proto_bytes(&mut msg, 3, b"/ipfs/ping/1.0.0");
+    // /ip4/127.0.0.1/tcp/0 as raw multiaddr bytes
+    proto_bytes(&mut msg, 4, &[0x04, 0x7f, 0x00, 0x00, 0x01, 0x06, 0x00, 0x00]);
+    proto_bytes(&mut msg, 5, b"ipfs/0.1.0");
+    proto_bytes(&mut msg, 6, b"test-native/1.0");
+
+    // Prepend the unsigned_varint length prefix used by the identify framing.
+    let mut framed = Vec::new();
+    proto_varint(&mut framed, msg.len() as u64);
+    framed.extend_from_slice(&msg);
+    framed
+}
+
+/// M10 — libp2p Identify exchange over WasiTcpTransport.
+///
+/// Native side: Noise XX + Yamux inbound, accepts the `/ipfs/id/1.0.0`
+/// substream, sends a hand-encoded `Identify` protobuf, half-closes the
+/// stream, then drives the muxer until WASM closes the connection.
+/// WASM side: `libp2p_identify::Behaviour`, breaks on `IdentifyEvent::Received`.
+#[tokio::test]
+async fn m10_identify() -> Result<()> {
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    use futures::future::poll_fn;
+    use futures::io::AsyncWrite;
+    use libp2p_core::muxing::StreamMuxer;
+    use libp2p_core::upgrade::{InboundConnectionUpgrade, UpgradeInfo};
+    use libp2p_identity::Keypair;
+    use multistream_select::listener_select_proto;
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+
+    let native_key = Keypair::generate_ed25519();
+    let native_peer_id = native_key.public().to_peer_id();
+
+    let native_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let native_port = native_listener.local_addr()?.port();
+    let native_multiaddr: libp2p_core::Multiaddr =
+        format!("/ip4/127.0.0.1/tcp/{native_port}").parse().unwrap();
+
+    eprintln!("M10: native listener at {native_multiaddr}, peer_id={native_peer_id}");
+
+    let wasm = build_component("identify")?;
+
+    let env = [
+        ("NATIVE_ADDR".to_string(), native_multiaddr.to_string()),
+        ("NATIVE_PEER_ID".to_string(), native_peer_id.to_string()),
+    ];
+    let env_refs: Vec<(&str, &str)> =
+        env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
+
+    let (wasm_result, native_result) = tokio::join!(
+        run_component_with_env(&wasm, &env_refs),
+        async move {
+            let (tcp_stream, _) = native_listener.accept().await.context("accept")?;
+            let compat = tcp_stream.compat();
+
+            // Noise XX inbound
+            let noise_cfg =
+                libp2p_noise::Config::new(&native_key).context("native noise config")?;
+            let (noise_proto, negotiated) =
+                listener_select_proto(compat, noise_cfg.protocol_info())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("noise negotiation: {e}"))?;
+            let (_remote_peer_id, noise_stream) = noise_cfg
+                .upgrade_inbound(negotiated, noise_proto)
+                .await
+                .map_err(|e| anyhow::anyhow!("noise upgrade: {e}"))?;
+
+            // Yamux inbound
+            let yamux_cfg = libp2p_yamux::Config::default();
+            let (yamux_proto, negotiated2) =
+                listener_select_proto(noise_stream, yamux_cfg.protocol_info())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("yamux negotiation: {e}"))?;
+            let mut muxer = yamux_cfg
+                .upgrade_inbound(negotiated2, yamux_proto)
+                .await
+                .map_err(|e| anyhow::anyhow!("yamux upgrade: {e}"))?;
+
+            eprintln!("M10 native: handshake complete, waiting for identify substream");
+
+            let identify_frame = build_identify_frame(&native_key);
+
+            type NegFut = Pin<Box<dyn std::future::Future<
+                Output = std::result::Result<
+                    (&'static str, multistream_select::Negotiated<libp2p_yamux::Stream>),
+                    multistream_select::NegotiationError,
+                >,
+            >>>;
+
+            let mut stream_opt: Option<libp2p_yamux::Stream> = None;
+            let mut neg_fut: Option<NegFut> = None;
+            let mut neg_stream: Option<
+                multistream_select::Negotiated<libp2p_yamux::Stream>,
+            > = None;
+            let mut written: usize = 0;
+            let mut flushed = false;
+            let mut closed = false;
+
+            poll_fn(|cx| {
+                // Step 1: accept inbound Yamux stream.
+                if stream_opt.is_none() && neg_fut.is_none() && neg_stream.is_none() {
+                    match Pin::new(&mut muxer).poll_inbound(cx) {
+                        Poll::Ready(Ok(s)) => stream_opt = Some(s),
+                        Poll::Ready(Err(e)) => {
+                            return Poll::Ready(Err(anyhow::anyhow!("poll_inbound: {e}")))
+                        }
+                        Poll::Pending => return Poll::Pending,
+                    }
+                }
+
+                // Step 2: negotiate /ipfs/id/1.0.0 (listener = info sender).
+                if neg_fut.is_none() && neg_stream.is_none() {
+                    if let Some(stream) = stream_opt.take() {
+                        neg_fut = Some(Box::pin(listener_select_proto(
+                            stream,
+                            std::iter::once("/ipfs/id/1.0.0"),
+                        )));
+                    }
+                }
+
+                // Step 3: drive negotiation.
+                if let Some(fut) = neg_fut.as_mut() {
+                    match fut.as_mut().poll(cx) {
+                        Poll::Ready(Ok((_proto, ns))) => {
+                            neg_stream = Some(ns);
+                            neg_fut = None;
+                        }
+                        Poll::Ready(Err(e)) => {
+                            return Poll::Ready(Err(anyhow::anyhow!("identify negotiation: {e}")))
+                        }
+                        Poll::Pending => {
+                            let _ = Pin::new(&mut muxer).poll_inbound(cx);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+
+                let Some(ns) = neg_stream.as_mut() else {
+                    return Poll::Pending;
+                };
+
+                // Step 4: write the length-prefixed Identify protobuf.
+                while written < identify_frame.len() {
+                    match Pin::new(&mut *ns).poll_write(cx, &identify_frame[written..]) {
+                        Poll::Ready(Ok(n)) => written += n,
+                        Poll::Ready(Err(e)) => {
+                            return Poll::Ready(Err(anyhow::anyhow!("identify write: {e}")))
+                        }
+                        Poll::Pending => {
+                            let _ = Pin::new(&mut muxer).poll_inbound(cx);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+
+                // Step 5: flush.
+                if !flushed {
+                    match Pin::new(&mut *ns).poll_flush(cx) {
+                        Poll::Ready(Ok(())) => flushed = true,
+                        Poll::Ready(Err(e)) => {
+                            return Poll::Ready(Err(anyhow::anyhow!("identify flush: {e}")))
+                        }
+                        Poll::Pending => {
+                            let _ = Pin::new(&mut muxer).poll_inbound(cx);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+
+                // Step 6: half-close the write side (identify protocol requirement).
+                // This signals EOF to the WASM reader so it knows the message is complete.
+                if !closed {
+                    match Pin::new(&mut *ns).poll_close(cx) {
+                        Poll::Ready(Ok(())) => closed = true,
+                        Poll::Ready(Err(_)) => closed = true, // yamux may error on close; ok
+                        Poll::Pending => {
+                            let _ = Pin::new(&mut muxer).poll_inbound(cx);
+                            return Poll::Pending;
+                        }
+                    }
+                }
+
+                // Step 7: drive muxer until WASM closes the connection.
+                match Pin::new(&mut muxer).poll_inbound(cx) {
+                    Poll::Ready(Err(_)) => {
+                        eprintln!("M10 native: identify sent, connection closed by remote");
+                        Poll::Ready(Ok::<(), anyhow::Error>(()))
+                    }
+                    Poll::Ready(Ok(s)) => {
+                        drop(s);
+                        Poll::Pending
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await?;
+
+            drop(muxer);
+            eprintln!("M10 native: done");
+            Ok::<(), anyhow::Error>(())
+        }
+    );
+
+    wasm_result.context("WASM identify component failed")?;
+    native_result.context("native identify responder failed")?;
+    Ok(())
+}
+
+/// M11 — Inbound libp2p Swarm connection: WASM as listener, native as dialer.
+///
+/// First time the test exercises the inbound path of WasiTcpTransport inside a
+/// full Swarm.  The native side uses `OutboundConnectionUpgrade` (Noise XX
+/// initiator + Yamux client) and `dialer_select_proto` — the mirror image of
+/// all previous tests where native was the responder.
+///
+/// Port coordination: native pre-allocates an ephemeral port (bind-0 then
+/// drop), hands it to WASM via `LISTEN_PORT`, waits 300 ms for WASM to bind,
+/// then dials.  The brief sleep is enough on loopback; if the race ever bites
+/// the test will fail with ECONNREFUSED and can simply be re-run.
+#[tokio::test]
+async fn m11_listener() -> Result<()> {
+    use std::pin::Pin;
+    use std::task::Poll;
+
+    use futures::future::poll_fn;
+    use libp2p_core::muxing::StreamMuxer;
+    use libp2p_core::upgrade::{OutboundConnectionUpgrade, UpgradeInfo};
+    use libp2p_identity::Keypair;
+    use multistream_select::{Version, dialer_select_proto};
+    use tokio_util::compat::TokioAsyncReadCompatExt;
+
+    let native_key = Keypair::generate_ed25519();
+    let native_peer_id = native_key.public().to_peer_id();
+
+    // Grab a free port then immediately release it so WASM can bind it.
+    let tmp = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let wasm_port = tmp.local_addr()?.port();
+    drop(tmp);
+
+    eprintln!("M11: WASM will listen on port {wasm_port}, native peer_id={native_peer_id}");
+
+    let wasm = build_component("listener")?;
+
+    let env = [
+        ("LISTEN_PORT".to_string(), wasm_port.to_string()),
+        ("NATIVE_PEER_ID".to_string(), native_peer_id.to_string()),
+    ];
+    let env_refs: Vec<(&str, &str)> =
+        env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
+
+    let (wasm_result, native_result) = tokio::join!(
+        run_component_with_env(&wasm, &env_refs),
+        async move {
+            // Give WASM time to bind and start listening.
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            let tcp = tokio::net::TcpStream::connect(format!("127.0.0.1:{wasm_port}"))
+                .await
+                .context("connect to WASM listener")?;
+            let compat = tcp.compat();
+
+            // Noise XX outbound (initiator)
+            let noise_cfg =
+                libp2p_noise::Config::new(&native_key).context("native noise config")?;
+            let (noise_proto, negotiated) =
+                dialer_select_proto(compat, noise_cfg.protocol_info(), Version::V1)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("noise negotiation: {e}"))?;
+            let (_remote_peer_id, noise_stream) = noise_cfg
+                .upgrade_outbound(negotiated, noise_proto)
+                .await
+                .map_err(|e| anyhow::anyhow!("noise upgrade: {e}"))?;
+
+            // Yamux outbound (client)
+            let yamux_cfg = libp2p_yamux::Config::default();
+            let (yamux_proto, negotiated2) =
+                dialer_select_proto(noise_stream, yamux_cfg.protocol_info(), Version::V1)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("yamux negotiation: {e}"))?;
+            let mut muxer = yamux_cfg
+                .upgrade_outbound(negotiated2, yamux_proto)
+                .await
+                .map_err(|e| anyhow::anyhow!("yamux upgrade: {e}"))?;
+
+            eprintln!("M11 native: handshake complete, waiting for WASM to close");
+
+            // Drive the muxer until WASM closes the connection (after it
+            // processes ConnectionEstablished and main() returns).
+            poll_fn(|cx| {
+                match Pin::new(&mut muxer).poll_inbound(cx) {
+                    Poll::Ready(Err(_)) => {
+                        eprintln!("M11 native: connection closed by WASM");
+                        Poll::Ready(Ok::<(), anyhow::Error>(()))
+                    }
+                    Poll::Ready(Ok(s)) => {
+                        drop(s);
+                        Poll::Pending
+                    }
+                    Poll::Pending => Poll::Pending,
+                }
+            })
+            .await?;
+
+            drop(muxer);
+            eprintln!("M11 native: done");
+            Ok::<(), anyhow::Error>(())
+        }
+    );
+
+    wasm_result.context("WASM listener component failed")?;
+    native_result.context("native dialer failed")?;
+    Ok(())
+}
+
 /// M9 — libp2p Ping round-trip over WasiTcpTransport.
 ///
 /// Demonstrates that `futures_timer`-based behaviours work on wasm32-wasip2

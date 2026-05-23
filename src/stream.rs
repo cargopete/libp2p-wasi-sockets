@@ -5,29 +5,53 @@ use std::task::{Context, Poll};
 
 use futures::io::{AsyncRead, AsyncWrite};
 
-/// A bidirectional TCP byte-stream wrapping `wstd::net::TcpStream`.
+#[cfg(target_arch = "wasm32")]
+use std::net::SocketAddr;
+#[cfg(target_arch = "wasm32")]
+use wasip2::{
+    io::streams::{InputStream, OutputStream},
+    sockets::tcp::{ShutdownType, TcpSocket},
+};
+#[cfg(target_arch = "wasm32")]
+use wstd::io::{AsyncInputStream, AsyncOutputStream};
+
+/// A bidirectional TCP byte-stream wrapping raw WASI socket resources.
 ///
-/// Bridges wstd's async-fn-based traits with the `futures::io` poll-based traits
+/// Bridges WASI's async I/O streams with the `futures::io` poll-based traits
 /// required by libp2p's upgrade machinery (Noise, Yamux, …).
+///
+/// Obtain instances through [`WasiTcpTransport`](crate::WasiTcpTransport);
+/// do not construct directly.
 ///
 /// # Implementation notes
 ///
-/// The stream is held in an `Arc` so that independent read and write futures can
-/// each hold a clone without cloning the underlying WASI socket handle.
 /// Each `poll_read` / `poll_write` call that finds no in-flight future creates
-/// one, boxes it as a non-Send `Pin<Box<dyn Future>>`, and drives it on
-/// subsequent polls.
+/// one, boxes it, and drives it on subsequent polls.  `AsyncInputStream::read`
+/// and `AsyncOutputStream::write` take `&self`, so they can be shared across
+/// futures without cloning the underlying WASI handle — they are held in Arcs.
 ///
 /// `unsafe impl Send` is provided for the wasm32-wasip2 target, where the
-/// runtime is single-threaded and WASI resources (integer resource handles)
-/// are trivially safe to "send" across the (non-existent) thread boundary.
+/// runtime is single-threaded and WASI resource handles (integers) are trivially
+/// safe to "send" across the non-existent thread boundary.
 pub struct WasiTcpStream {
     #[cfg(target_arch = "wasm32")]
-    inner: Arc<wstd::net::TcpStream>,
+    input: Arc<AsyncInputStream>,
+    #[cfg(target_arch = "wasm32")]
+    output: Arc<AsyncOutputStream>,
+    /// Remote peer address, available for inbound connections (accepted by a
+    /// listener) and outbound connections (dialled directly).
+    #[cfg(target_arch = "wasm32")]
+    peer_addr: Option<SocketAddr>,
     #[cfg(target_arch = "wasm32")]
     read_state: ReadState,
     #[cfg(target_arch = "wasm32")]
     write_state: WriteState,
+    /// Kept alive to hold the WASI TCP socket resource open.  Declared last
+    /// so it drops after `input`/`output`, whose `InputStream`/`OutputStream`
+    /// are children of this socket in the WASI resource model — dropping the
+    /// parent while children exist produces a "resource has children" trap.
+    #[cfg(target_arch = "wasm32")]
+    _socket: Arc<TcpSocket>,
     #[cfg(not(target_arch = "wasm32"))]
     _phantom: std::marker::PhantomData<()>,
 }
@@ -58,17 +82,44 @@ enum WriteState {
 }
 
 impl WasiTcpStream {
-    /// Wrap a connected `wstd::net::TcpStream` in the libp2p-compatible stream shim.
+    /// Construct a `WasiTcpStream` from raw WASI socket resources.
     ///
-    /// Consumers typically obtain streams via [`WasiTcpTransport`](crate::WasiTcpTransport), but
-    /// you can also wrap a stream you constructed directly with `wstd::net::TcpStream::connect`.
+    /// # Arguments
+    ///
+    /// * `socket`    — The accepted or connected WASI TCP socket.  Kept alive
+    ///                 to ensure the connection remains open; shutdown on Drop.
+    /// * `input`     — The WASI input stream from `accept()` / `finish_connect()`.
+    /// * `output`    — The WASI output stream from the same.
+    /// * `peer_addr` — Remote peer's `SocketAddr`, if known.
     #[cfg(target_arch = "wasm32")]
-    pub fn new(stream: wstd::net::TcpStream) -> Self {
+    pub(crate) fn from_raw(
+        socket: TcpSocket,
+        input: InputStream,
+        output: OutputStream,
+        peer_addr: Option<SocketAddr>,
+    ) -> Self {
         Self {
-            inner: Arc::new(stream),
+            input: Arc::new(AsyncInputStream::new(input)),
+            output: Arc::new(AsyncOutputStream::new(output)),
+            peer_addr,
             read_state: ReadState::Idle,
             write_state: WriteState::Idle,
+            _socket: Arc::new(socket),
         }
+    }
+
+    /// Returns the remote peer's address, if available.
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn peer_addr(&self) -> Option<SocketAddr> {
+        self.peer_addr
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl Drop for WasiTcpStream {
+    fn drop(&mut self) {
+        // Best-effort graceful shutdown — mirrors wstd's TcpStream::drop.
+        let _ = self._socket.shutdown(ShutdownType::Both);
     }
 }
 
@@ -84,17 +135,11 @@ impl AsyncRead for WasiTcpStream {
             loop {
                 match &mut this.read_state {
                     ReadState::Idle => {
-                        let stream = Arc::clone(&this.inner);
+                        let stream = Arc::clone(&this.input);
                         let len = buf.len();
-                        // The async block captures `stream` (Arc, 'static) and
-                        // `len` (usize, Copy).  The borrow of `&*stream` inside
-                        // the block is self-referential within the state machine,
-                        // which async/await handles correctly via Pin.
                         let fut: WasmBoxFut<_> = Box::pin(async move {
-                            use wstd::io::AsyncRead as _;
                             let mut tmp = vec![0u8; len];
-                            let mut s = &*stream;
-                            let n = s.read(&mut tmp).await?;
+                            let n = stream.read(&mut tmp).await?;
                             Ok((tmp, n))
                         });
                         this.read_state = ReadState::Pending(fut);
@@ -135,13 +180,9 @@ impl AsyncWrite for WasiTcpStream {
             loop {
                 match &mut this.write_state {
                     WriteState::Idle => {
-                        let stream = Arc::clone(&this.inner);
+                        let stream = Arc::clone(&this.output);
                         let data = buf.to_vec();
-                        let fut: WasmBoxFut<_> = Box::pin(async move {
-                            use wstd::io::AsyncWrite as _;
-                            let mut s = &*stream;
-                            s.write(&data).await
-                        });
+                        let fut: WasmBoxFut<_> = Box::pin(async move { stream.write(&data).await });
                         this.write_state = WriteState::Writing(fut);
                     }
                     WriteState::Writing(fut) => match fut.as_mut().poll(cx) {
@@ -173,12 +214,8 @@ impl AsyncWrite for WasiTcpStream {
             loop {
                 match &mut this.write_state {
                     WriteState::Idle => {
-                        let stream = Arc::clone(&this.inner);
-                        let fut: WasmBoxFut<_> = Box::pin(async move {
-                            use wstd::io::AsyncWrite as _;
-                            let mut s = &*stream;
-                            s.flush().await
-                        });
+                        let stream = Arc::clone(&this.output);
+                        let fut: WasmBoxFut<_> = Box::pin(async move { stream.flush().await });
                         this.write_state = WriteState::Flushing(fut);
                     }
                     // A write is in flight; wait for it before flushing.
@@ -201,13 +238,15 @@ impl AsyncWrite for WasiTcpStream {
         mut self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<io::Result<()>> {
-        // Flush remaining data; the socket is shut down on Drop (wstd's TcpStream Drop impl
-        // calls socket.shutdown(Both)).
+        // Flush remaining data; the socket is shut down on Drop.
         self.as_mut().poll_flush(cx)
     }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn unsupported() -> io::Error {
-    io::Error::new(io::ErrorKind::Unsupported, "WasiTcpStream is only functional on wasm32-wasip2")
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        "WasiTcpStream is only functional on wasm32-wasip2",
+    )
 }

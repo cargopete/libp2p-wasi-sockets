@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 # This crate is only ever built for wasm32-wasip2.
-# It tests WasiTcpStream's AsyncRead / AsyncWrite bridge end-to-end.
+# It tests WasiTcpStream's AsyncRead / AsyncWrite bridge via WasiTcpTransport.
 
 [[bin]]
 name = "echo"
@@ -13,5 +13,6 @@ path = "src/main.rs"
 
 [dependencies]
 libp2p-wasi-sockets = { path = "../../.." }
+libp2p-core         = { version = "0.43", default-features = false }
 wstd    = "0.6"
 futures = { version = "0.3", default-features = false, features = ["std", "async-await"] }

@@ -41,7 +41,7 @@ multistream-select = "0.13"
 tokio-util         = { version = "0.7", features = ["compat"] }
 wasmtime           = "44"
 wasmtime-wasi      = "44"
-tokio              = { version = "1", features = ["macros", "rt-multi-thread", "process", "net"] }
+tokio              = { version = "1", features = ["macros", "rt-multi-thread", "process", "net", "time"] }
 
 [lib]
 crate-type = ["rlib"]

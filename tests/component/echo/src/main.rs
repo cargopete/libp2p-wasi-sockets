@@ -2,7 +2,7 @@
 //!
 //! This binary is compiled for `wasm32-wasip2` and run under Wasmtime by
 //! `tests/integration.rs`.  It exercises the full `AsyncRead` / `AsyncWrite`
-//! bridge in a real loopback TCP round-trip:
+//! bridge in a real loopback TCP round-trip via `WasiTcpTransport`:
 //!
 //!   listener task ←── writes ──── dialer task
 //!                  ──── echo ───→
@@ -11,65 +11,74 @@
 //! failure or unexpected error causes a non-zero exit code, which the
 //! integration test harness treats as a test failure.
 
+use std::future::poll_fn;
+use std::pin::Pin;
+use std::task::Poll;
+
+use futures::future;
 use futures::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use libp2p_wasi_sockets::WasiTcpStream;
-use wstd::iter::AsyncIterator as _;
-use wstd::net::{TcpListener, TcpStream};
+use libp2p_core::transport::{DialOpts, ListenerId, PortUse, TransportEvent};
+use libp2p_core::{Endpoint, Transport};
+use libp2p_wasi_sockets::WasiTcpTransport;
 
 /// The message sent from dialer → listener and echoed back.
 const MSG: &[u8] = b"hello from WasiTcpStream M1";
 
 #[wstd::main]
 async fn main() {
+    let mut transport = WasiTcpTransport::default();
+    let listener_id = ListenerId::next();
+
     // ── Phase 1: bind listener on an ephemeral port ───────────────────────
-    let listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("TcpListener::bind");
+    transport
+        .listen_on(listener_id, "/ip4/127.0.0.1/tcp/0".parse().unwrap())
+        .expect("listen_on");
 
-    let port = listener
-        .local_addr()
-        .expect("local_addr")
-        .port();
+    // ── Phase 2: drive poll() until NewAddress ────────────────────────────
+    let listen_addr = poll_fn(|cx| match Pin::new(&mut transport).poll(cx) {
+        Poll::Ready(TransportEvent::NewAddress { listen_addr, .. }) => Poll::Ready(listen_addr),
+        Poll::Ready(_) | Poll::Pending => Poll::Pending,
+    })
+    .await;
 
-    // ── Phase 2: spawn the listener task ─────────────────────────────────
-    // wstd::runtime::spawn runs a task on the same single-threaded reactor.
-    let listener_task = wstd::runtime::spawn(async move {
-        let accepted = listener
-            .incoming()
-            .next()
-            .await
-            .expect("listener::next — no result")
-            .expect("listener::next — accept error");
+    // ── Phase 3: kick off the dial ────────────────────────────────────────
+    let dial_fut = transport
+        .dial(
+            listen_addr,
+            DialOpts {
+                role: Endpoint::Dialer,
+                port_use: PortUse::New,
+            },
+        )
+        .expect("dial");
 
-        let mut server = WasiTcpStream::new(accepted);
+    // ── Phase 4: drive accept and dial concurrently ───────────────────────
+    let accept_fut = poll_fn(|cx| match Pin::new(&mut transport).poll(cx) {
+        Poll::Ready(TransportEvent::Incoming { upgrade, .. }) => Poll::Ready(upgrade),
+        Poll::Ready(_) | Poll::Pending => Poll::Pending,
+    });
 
-        // Read MSG from dialer.
+    let (upgrade, dial_result) = future::join(accept_fut, dial_fut).await;
+
+    let mut server = upgrade.await.expect("server upgrade");
+    let mut client = dial_result.expect("dial future");
+
+    // ── Phase 5: byte exchange ─────────────────────────────────────────────
+    //
+    // Server reads MSG then echoes it back.  Run in a spawned task so client
+    // write and server read can proceed concurrently.
+    let server_task = wstd::runtime::spawn(async move {
         let mut buf = vec![0u8; MSG.len()];
         server
             .read_exact(&mut buf)
             .await
             .expect("server read_exact");
         assert_eq!(buf.as_slice(), MSG, "server: received bytes do not match MSG");
-
-        // Echo MSG back.
-        server
-            .write_all(&buf)
-            .await
-            .expect("server write_all");
+        server.write_all(&buf).await.expect("server write_all");
         server.flush().await.expect("server flush");
     });
 
-    // ── Phase 3: dial and exchange bytes ──────────────────────────────────
-    let raw = TcpStream::connect(format!("127.0.0.1:{port}").as_str())
-        .await
-        .expect("TcpStream::connect");
-
-    let mut client = WasiTcpStream::new(raw);
-
-    client
-        .write_all(MSG)
-        .await
-        .expect("client write_all");
+    client.write_all(MSG).await.expect("client write_all");
     client.flush().await.expect("client flush");
 
     let mut echo = vec![0u8; MSG.len()];
@@ -79,8 +88,7 @@ async fn main() {
         .expect("client read_exact");
     assert_eq!(echo.as_slice(), MSG, "client: echo bytes do not match MSG");
 
-    // ── Phase 4: join listener ────────────────────────────────────────────
-    listener_task.await;
+    server_task.await;
 
     eprintln!("M1 echo: PASS");
 }

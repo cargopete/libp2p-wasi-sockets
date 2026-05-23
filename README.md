@@ -34,7 +34,7 @@ This crate closes that gap.
 
 ## Status
 
-**v0.3.0** — `libp2p-ping` and timer-based behaviours verified on wasm32-wasip2.
+**v0.4.0** — `libp2p-identify` and inbound (listener) connections verified on wasm32-wasip2.
 
 | Milestone | Description | Status |
 |---|---|---|
@@ -48,6 +48,8 @@ This crate closes that gap.
 | M7 | DNS multiaddr support: `/dns4`, `/dns6`, `/dns` via `wasi:sockets/ip-name-lookup` | ✅ |
 | M8 | libp2p `Swarm` + full upgrade chain (Noise XX + Yamux + PeerId auth) on wasip2 | ✅ |
 | M9 | `libp2p-ping` round-trip on wasip2 — WASI-native `futures_timer` via `wasi:clocks` | ✅ |
+| M10 | `libp2p-identify` on wasip2 — Wasm component receives `IdentifyEvent::Received` | ✅ |
+| M11 | Inbound connections — Wasm component acts as TCP listener, native peer dials in | ✅ |
 
 ---
 

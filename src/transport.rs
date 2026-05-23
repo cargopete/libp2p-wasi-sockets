@@ -10,15 +10,37 @@ use libp2p_core::Transport;
 use tracing::warn;
 
 use crate::error::Error;
-use crate::multiaddr::{multiaddr_to_dial_target, multiaddr_to_socketaddr, socketaddr_to_multiaddr, DialTarget};
+use crate::multiaddr::{
+    multiaddr_to_dial_target, multiaddr_to_socketaddr, socketaddr_to_multiaddr, DialTarget,
+};
 use crate::stream::WasiTcpStream;
+
+#[cfg(target_arch = "wasm32")]
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+#[cfg(target_arch = "wasm32")]
+use wasip2::sockets::{
+    instance_network::instance_network,
+    network::{ErrorCode, IpAddressFamily, IpSocketAddress, Ipv4SocketAddress, Ipv6SocketAddress},
+    tcp::TcpSocket,
+    tcp_create_socket::create_tcp_socket,
+};
+#[cfg(target_arch = "wasm32")]
+use wstd::runtime::AsyncPollable;
 
 /// Configuration for [`WasiTcpTransport`].
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Disable Nagle's algorithm. Defaults to `true`.
+    /// Disable Nagle's algorithm.
+    ///
+    /// **Note**: TCP_NODELAY is not part of the WASI 0.2 sockets spec; this
+    /// field is accepted for API compatibility but has no effect at runtime.
     pub nodelay: bool,
-    /// TCP keep-alive interval. `None` disables keep-alive.
+    /// TCP keep-alive idle time.  `None` disables keep-alive.
+    ///
+    /// Applied via `wasi:sockets/tcp.set-keep-alive-enabled` +
+    /// `set-keep-alive-idle-time`.  Accepted sockets inherit keep-alive
+    /// settings from the listener socket per the WASI spec.
     pub keep_alive: Option<Duration>,
     /// Listen backlog passed to `wasi:sockets/tcp.set-listen-backlog-size`. Defaults to 128.
     pub listen_backlog: u32,
@@ -36,23 +58,62 @@ impl Default for Config {
 
 // ── wasm32-wasip2 implementation ─────────────────────────────────────────────
 
-/// Non-Send box future — sufficient for a single-threaded wasm32 runtime.
+/// Non-Send box future used internally during accept/bind sequencing.
 #[cfg(target_arch = "wasm32")]
 type WasmBoxFut<T> = Pin<Box<dyn std::future::Future<Output = T>>>;
+
+/// Thin `Send` wrapper for a `WasmBoxFut`.
+///
+/// wasm32-wasip2 is single-threaded — WASI resource handles (plain integers) are
+/// trivially safe to "send" across the non-existent thread boundary.  The `Send`
+/// bound on `Transport::Dial` is needed for `Transport::boxed()` / the libp2p
+/// Swarm, so we must assert it here.
+#[cfg(target_arch = "wasm32")]
+pub struct SendDialFut<T>(WasmBoxFut<T>);
+
+#[cfg(target_arch = "wasm32")]
+// SAFETY: wasm32-wasip2 is single-threaded; no thread ever borrows the future
+// concurrently.
+unsafe impl<T> Send for SendDialFut<T> {}
+
+#[cfg(target_arch = "wasm32")]
+impl<T> std::future::Future for SendDialFut<T> {
+    type Output = T;
+    fn poll(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<T> {
+        // SAFETY: we do not move `self.0` out of its pin.
+        unsafe { self.map_unchecked_mut(|s| &mut s.0) }.poll(cx)
+    }
+}
+
+/// A bound, listening raw WASI TCP socket.
+#[cfg(target_arch = "wasm32")]
+struct RawListener {
+    socket: TcpSocket,
+    /// Resolved local address, including the ephemeral port if 0 was requested.
+    local_addr: SocketAddr,
+}
+
+#[cfg(target_arch = "wasm32")]
+unsafe impl Send for RawListener {}
+#[cfg(target_arch = "wasm32")]
+unsafe impl Sync for RawListener {}
 
 /// State machine for a single listener identified by its [`ListenerId`].
 #[cfg(target_arch = "wasm32")]
 struct ListenerState {
-    bind_addr: std::net::SocketAddr,
-    /// The bound listener, available once the bind future resolves.
-    listener: Option<Arc<wstd::net::TcpListener>>,
-    /// In-flight bind future.
-    bind_future: Option<WasmBoxFut<std::io::Result<wstd::net::TcpListener>>>,
+    bind_addr: SocketAddr,
+    /// The bound listener, available once the bind+listen future resolves.
+    listener: Option<Arc<RawListener>>,
+    /// In-flight bind+listen future.
+    bind_future: Option<WasmBoxFut<std::io::Result<RawListener>>>,
     /// In-flight accept future.
-    accept_future: Option<WasmBoxFut<std::io::Result<wstd::net::TcpStream>>>,
+    accept_future: Option<WasmBoxFut<std::io::Result<(WasiTcpStream, Option<SocketAddr>)>>>,
     /// Whether we have emitted a `NewAddress` event for this listener.
-    /// Also used as a sentinel: set back to `false` after emitting `AddressExpired`
-    /// so the next `poll` knows to emit `ListenerClosed`.
+    /// Set back to `false` after emitting `AddressExpired` so the next `poll`
+    /// knows to emit `ListenerClosed` and remove the entry.
     announced: bool,
     /// Set by `remove_listener`; causes `poll` to emit `AddressExpired` (if
     /// `announced`) followed by `ListenerClosed`, then drop the entry.
@@ -67,7 +128,7 @@ struct ListenerState {
 /// pass `-S inherit-network` (or `--wasi inherit-network`).  Without it, all
 /// dials fail with [`Error::AccessDenied`] and listeners cannot be bound.
 pub struct WasiTcpTransport {
-    #[allow(dead_code)] // applied in M1 when nodelay/keep_alive socket options are set
+    #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
     config: Config,
     #[cfg(target_arch = "wasm32")]
     listeners: HashMap<ListenerId, ListenerState>,
@@ -107,9 +168,11 @@ impl Transport for WasiTcpTransport {
     /// The upgrade is immediate: the accepted stream is already a connected
     /// byte-stream; no further handshake is required at the transport layer.
     type ListenerUpgrade = futures::future::Ready<Result<Self::Output, Self::Error>>;
-    /// A boxed, non-Send future — adequate for a single-threaded wasm32 executor.
+    /// A boxed future that is `Send` via an `unsafe` wrapper (wasm32 is
+    /// single-threaded, so the assertion is always safe in practice).  The
+    /// `Send` bound is required by `Transport::boxed()` used by the libp2p Swarm.
     #[cfg(target_arch = "wasm32")]
-    type Dial = WasmBoxFut<Result<Self::Output, Self::Error>>;
+    type Dial = SendDialFut<Result<Self::Output, Self::Error>>;
     #[cfg(not(target_arch = "wasm32"))]
     type Dial = futures::future::Pending<Result<Self::Output, Self::Error>>;
 
@@ -122,9 +185,49 @@ impl Transport for WasiTcpTransport {
 
         #[cfg(target_arch = "wasm32")]
         {
-            let addr_str = sock_addr.to_string();
-            let bind_fut: WasmBoxFut<std::io::Result<wstd::net::TcpListener>> =
-                Box::pin(async move { wstd::net::TcpListener::bind(&addr_str).await });
+            let listen_backlog = self.config.listen_backlog;
+            let keep_alive = self.config.keep_alive;
+            let family = if sock_addr.is_ipv4() {
+                IpAddressFamily::Ipv4
+            } else {
+                IpAddressFamily::Ipv6
+            };
+            let wasi_bind_addr = sockaddr_to_wasi(sock_addr);
+
+            let bind_fut: WasmBoxFut<std::io::Result<RawListener>> = Box::pin(async move {
+                let socket = create_tcp_socket(family).map_err(wasi_io_err)?;
+                socket.set_listen_backlog_size(listen_backlog as u64).ok();
+                // Set keep-alive on the listener; accepted sockets inherit it per WASI spec.
+                if let Some(ka) = keep_alive {
+                    let _ = socket.set_keep_alive_enabled(true);
+                    let _ = socket.set_keep_alive_idle_time(ka.as_nanos() as u64);
+                }
+                let network = instance_network();
+                socket.start_bind(&network, wasi_bind_addr).map_err(|e| {
+                    if matches!(e, ErrorCode::AccessDenied) {
+                        warn!(
+                            "Network capability denied — pass `-S inherit-network` \
+                             to wasmtime to grant the component network access."
+                        );
+                        std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "network access denied",
+                        )
+                    } else {
+                        wasi_io_err(e)
+                    }
+                })?;
+                AsyncPollable::new(socket.subscribe()).wait_for().await;
+                socket.finish_bind().map_err(wasi_io_err)?;
+                socket.start_listen().map_err(wasi_io_err)?;
+                AsyncPollable::new(socket.subscribe()).wait_for().await;
+                socket.finish_listen().map_err(wasi_io_err)?;
+                let local_addr = socket
+                    .local_address()
+                    .map(wasi_sockaddr_to_std)
+                    .map_err(wasi_io_err)?;
+                Ok(RawListener { socket, local_addr })
+            });
 
             self.listeners.insert(
                 id,
@@ -171,41 +274,71 @@ impl Transport for WasiTcpTransport {
     ) -> Result<Self::Dial, TransportError<Self::Error>> {
         #[cfg(target_arch = "wasm32")]
         {
+            let keep_alive = self.config.keep_alive;
             let target = multiaddr_to_dial_target(&addr).map_err(TransportError::Other)?;
-            let dial_fut: WasmBoxFut<Result<WasiTcpStream, Error>> =
-                Box::pin(async move {
-                    // Resolve DNS if needed.
-                    let sock_addr = match target {
-                        DialTarget::Addr(sa) => sa,
-                        DialTarget::Dns { host, port, family } => {
-                            crate::dns::resolve_host(&host, port, family).await?
-                        }
-                    };
-
-                    // wstd does not yet support IPv6 TCP (it calls todo!() internally).
-                    if sock_addr.is_ipv6() {
-                        return Err(Error::Io(std::io::Error::new(
-                            std::io::ErrorKind::Unsupported,
-                            "IPv6 TCP is not yet supported (wstd limitation)",
-                        )));
+            let dial_fut: WasmBoxFut<Result<WasiTcpStream, Error>> = Box::pin(async move {
+                // Resolve DNS if needed.
+                let sock_addr = match target {
+                    DialTarget::Addr(sa) => sa,
+                    DialTarget::Dns { host, port, family } => {
+                        crate::dns::resolve_host(&host, port, family).await?
                     }
+                };
 
-                    wstd::net::TcpStream::connect(sock_addr)
-                        .await
-                        .map(WasiTcpStream::new)
-                        .map_err(|e| {
-                            if e.kind() == std::io::ErrorKind::PermissionDenied {
-                                warn!(
-                                    "Network capability denied — pass `-S inherit-network` \
-                                     to wasmtime to grant the component network access."
-                                );
-                                Error::AccessDenied
-                            } else {
-                                Error::Io(e)
-                            }
-                        })
-                });
-            return Ok(dial_fut);
+                if sock_addr.is_ipv6() {
+                    return Err(Error::Io(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "IPv6 TCP is not yet supported (wstd limitation)",
+                    )));
+                }
+
+                let socket =
+                    create_tcp_socket(IpAddressFamily::Ipv4).map_err(|e| match e {
+                        ErrorCode::AccessDenied => {
+                            warn!(
+                                "Network capability denied — pass `-S inherit-network` \
+                                 to wasmtime to grant the component network access."
+                            );
+                            Error::AccessDenied
+                        }
+                        _ => Error::Io(wasi_io_err(e)),
+                    })?;
+
+                if let Some(ka) = keep_alive {
+                    let _ = socket.set_keep_alive_enabled(true);
+                    let _ = socket.set_keep_alive_idle_time(ka.as_nanos() as u64);
+                }
+
+                let network = instance_network();
+                let wasi_remote = sockaddr_to_wasi(sock_addr);
+                socket.start_connect(&network, wasi_remote).map_err(|e| match e {
+                    ErrorCode::AccessDenied => {
+                        warn!(
+                            "Network capability denied — pass `-S inherit-network` \
+                             to wasmtime to grant the component network access."
+                        );
+                        Error::AccessDenied
+                    }
+                    _ => Error::Io(wasi_io_err(e)),
+                })?;
+
+                AsyncPollable::new(socket.subscribe()).wait_for().await;
+
+                let (input, output) =
+                    socket.finish_connect().map_err(|e| match e {
+                        ErrorCode::AccessDenied => {
+                            warn!(
+                                "Network capability denied — pass `-S inherit-network` \
+                                 to wasmtime to grant the component network access."
+                            );
+                            Error::AccessDenied
+                        }
+                        _ => Error::Io(wasi_io_err(e)),
+                    })?;
+
+                Ok(WasiTcpStream::from_raw(socket, input, output, Some(sock_addr)))
+            });
+            return Ok(SendDialFut(dial_fut));
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -237,8 +370,7 @@ impl Transport for WasiTcpTransport {
                         let addr = state
                             .listener
                             .as_ref()
-                            .and_then(|l| l.local_addr().ok())
-                            .map(socketaddr_to_multiaddr)
+                            .map(|l| socketaddr_to_multiaddr(l.local_addr))
                             .unwrap_or_else(|| socketaddr_to_multiaddr(state.bind_addr));
                         state.announced = false;
                         return Poll::Ready(TransportEvent::AddressExpired {
@@ -255,7 +387,7 @@ impl Transport for WasiTcpTransport {
                     });
                 }
 
-                // ── Phase 1: drive the bind future ────────────────────────────
+                // ── Phase 1: drive the bind+listen future ──────────────────────
                 if let Some(ref mut bind_fut) = state.bind_future {
                     match bind_fut.as_mut().poll(cx) {
                         Poll::Pending => continue,
@@ -271,12 +403,9 @@ impl Transport for WasiTcpTransport {
                                 error: err,
                             });
                         }
-                        Poll::Ready(Ok(listener)) => {
-                            let local_addr = listener
-                                .local_addr()
-                                .map(socketaddr_to_multiaddr)
-                                .unwrap_or_else(|_| socketaddr_to_multiaddr(state.bind_addr));
-                            state.listener = Some(Arc::new(listener));
+                        Poll::Ready(Ok(raw_listener)) => {
+                            let local_addr = socketaddr_to_multiaddr(raw_listener.local_addr);
+                            state.listener = Some(Arc::new(raw_listener));
                             state.bind_future = None;
                             state.announced = true;
                             return Poll::Ready(TransportEvent::NewAddress {
@@ -295,17 +424,32 @@ impl Transport for WasiTcpTransport {
                 if state.accept_future.is_none() {
                     let listener = Arc::clone(&listener_arc);
                     state.accept_future = Some(Box::pin(async move {
-                        use wstd::iter::AsyncIterator as _;
-                        listener
-                            .incoming()
-                            .next()
-                            .await
-                            .unwrap_or_else(|| {
-                                Err(std::io::Error::new(
-                                    std::io::ErrorKind::BrokenPipe,
-                                    "listener closed",
-                                ))
-                            })
+                        loop {
+                            match listener.socket.accept() {
+                                Ok((accepted, input, output)) => {
+                                    // Peer address from the accepted socket — this is the real
+                                    // remote address, not the listen address placeholder used
+                                    // in earlier versions.
+                                    let peer_addr = accepted
+                                        .remote_address()
+                                        .map(wasi_sockaddr_to_std)
+                                        .ok();
+                                    let stream = WasiTcpStream::from_raw(
+                                        accepted, input, output, peer_addr,
+                                    );
+                                    return Ok::<
+                                        (WasiTcpStream, Option<SocketAddr>),
+                                        std::io::Error,
+                                    >((stream, peer_addr));
+                                }
+                                Err(ErrorCode::WouldBlock) => {
+                                    AsyncPollable::new(listener.socket.subscribe())
+                                        .wait_for()
+                                        .await;
+                                }
+                                Err(e) => return Err(wasi_io_err(e)),
+                            }
+                        }
                     }));
                 }
 
@@ -319,17 +463,12 @@ impl Transport for WasiTcpTransport {
                                 error: Error::Io(e),
                             });
                         }
-                        Poll::Ready(Ok(tcp_stream)) => {
+                        Poll::Ready(Ok((wasi_stream, peer_addr))) => {
                             state.accept_future = None;
-                            let local_addr = listener_arc
-                                .local_addr()
+                            let local_addr = socketaddr_to_multiaddr(listener_arc.local_addr);
+                            let send_back_addr = peer_addr
                                 .map(socketaddr_to_multiaddr)
-                                .unwrap_or_else(|_| socketaddr_to_multiaddr(state.bind_addr));
-                            // send_back_addr: wstd's TcpStream::peer_addr() returns a debug
-                            // string (not a SocketAddr).  For v0.1.0 we use the listen addr as a
-                            // placeholder.  Tracking issue: add proper peer-addr extraction.
-                            let send_back_addr = local_addr.clone();
-                            let wasi_stream = WasiTcpStream::new(tcp_stream);
+                                .unwrap_or_else(|| local_addr.clone());
                             return Poll::Ready(TransportEvent::Incoming {
                                 listener_id: id,
                                 upgrade: futures::future::ready(Ok(wasi_stream)),
@@ -347,4 +486,53 @@ impl Transport for WasiTcpTransport {
         #[cfg(not(target_arch = "wasm32"))]
         Poll::Pending
     }
+}
+
+// ── wasm32-only helpers ────────────────────────────────────────────────────────
+
+/// Convert a `std::net::SocketAddr` into a WASI `IpSocketAddress`.
+#[cfg(target_arch = "wasm32")]
+fn sockaddr_to_wasi(addr: SocketAddr) -> IpSocketAddress {
+    match addr {
+        SocketAddr::V4(a) => {
+            let [b0, b1, b2, b3] = a.ip().octets();
+            IpSocketAddress::Ipv4(Ipv4SocketAddress {
+                port: a.port(),
+                address: (b0, b1, b2, b3),
+            })
+        }
+        SocketAddr::V6(a) => {
+            let [s0, s1, s2, s3, s4, s5, s6, s7] = a.ip().segments();
+            IpSocketAddress::Ipv6(Ipv6SocketAddress {
+                port: a.port(),
+                flow_info: a.flowinfo(),
+                address: (s0, s1, s2, s3, s4, s5, s6, s7),
+                scope_id: a.scope_id(),
+            })
+        }
+    }
+}
+
+/// Convert a WASI `IpSocketAddress` into a `std::net::SocketAddr`.
+#[cfg(target_arch = "wasm32")]
+fn wasi_sockaddr_to_std(addr: IpSocketAddress) -> SocketAddr {
+    match addr {
+        IpSocketAddress::Ipv4(a) => {
+            let (b0, b1, b2, b3) = a.address;
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::new(b0, b1, b2, b3)), a.port)
+        }
+        IpSocketAddress::Ipv6(a) => {
+            let (s0, s1, s2, s3, s4, s5, s6, s7) = a.address;
+            SocketAddr::new(
+                IpAddr::V6(Ipv6Addr::new(s0, s1, s2, s3, s4, s5, s6, s7)),
+                a.port,
+            )
+        }
+    }
+}
+
+/// Wrap a WASI `ErrorCode` as a generic `std::io::Error`.
+#[cfg(target_arch = "wasm32")]
+fn wasi_io_err(e: ErrorCode) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}"))
 }
