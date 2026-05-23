@@ -53,6 +53,7 @@ This crate closes that gap.
 | M12 | WASM-to-WASM — two Wasm components connect directly, no native peer involved | ✅ |
 | M13 | `libp2p-gossipsub` pub/sub — two WASM components exchange a gossipsub message | ✅ |
 | M14 | `libp2p-kad` Kademlia DHT — WASM provider stores a record, WASM seeker retrieves it | ✅ |
+| M15 | crates.io release v0.5.0 | ✅ |
 
 ---
 
