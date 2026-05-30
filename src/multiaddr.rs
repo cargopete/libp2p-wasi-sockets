@@ -153,9 +153,10 @@ mod tests {
 
     #[test]
     fn strips_p2p_suffix() {
-        let ma: Multiaddr = "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWGjwWkrTXkqQKGegFKSQpKyUMMU6ZVJZ7suwT1SjTz6Vs"
-            .parse()
-            .unwrap();
+        let ma: Multiaddr =
+            "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWGjwWkrTXkqQKGegFKSQpKyUMMU6ZVJZ7suwT1SjTz6Vs"
+                .parse()
+                .unwrap();
         let sa = multiaddr_to_socketaddr(&ma).unwrap();
         assert_eq!(sa.port(), 4001);
         assert_eq!(sa.ip(), IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)));
@@ -173,7 +174,9 @@ mod tests {
     fn dial_target_ipv4() {
         let ma: Multiaddr = "/ip4/1.2.3.4/tcp/1234".parse().unwrap();
         let target = multiaddr_to_dial_target(&ma).unwrap();
-        let DialTarget::Addr(sa) = target else { panic!("expected Addr") };
+        let DialTarget::Addr(sa) = target else {
+            panic!("expected Addr")
+        };
         assert_eq!(sa, "1.2.3.4:1234".parse::<SocketAddr>().unwrap());
     }
 
@@ -181,7 +184,9 @@ mod tests {
     fn dial_target_ipv6() {
         let ma: Multiaddr = "/ip6/::1/tcp/4001".parse().unwrap();
         let target = multiaddr_to_dial_target(&ma).unwrap();
-        let DialTarget::Addr(sa) = target else { panic!("expected Addr") };
+        let DialTarget::Addr(sa) = target else {
+            panic!("expected Addr")
+        };
         assert_eq!(sa.port(), 4001);
     }
 
@@ -189,7 +194,9 @@ mod tests {
     fn dial_target_dns4() {
         let ma: Multiaddr = "/dns4/example.com/tcp/80".parse().unwrap();
         let target = multiaddr_to_dial_target(&ma).unwrap();
-        let DialTarget::Dns { host, port, family } = target else { panic!("expected Dns") };
+        let DialTarget::Dns { host, port, family } = target else {
+            panic!("expected Dns")
+        };
         assert_eq!(host, "example.com");
         assert_eq!(port, 80);
         assert!(matches!(family, DnsFamily::V4));
@@ -199,7 +206,9 @@ mod tests {
     fn dial_target_dns6() {
         let ma: Multiaddr = "/dns6/example.com/tcp/443".parse().unwrap();
         let target = multiaddr_to_dial_target(&ma).unwrap();
-        let DialTarget::Dns { family, .. } = target else { panic!("expected Dns") };
+        let DialTarget::Dns { family, .. } = target else {
+            panic!("expected Dns")
+        };
         assert!(matches!(family, DnsFamily::V6));
     }
 
@@ -207,7 +216,9 @@ mod tests {
     fn dial_target_dns_any() {
         let ma: Multiaddr = "/dns/example.com/tcp/8080".parse().unwrap();
         let target = multiaddr_to_dial_target(&ma).unwrap();
-        let DialTarget::Dns { family, .. } = target else { panic!("expected Dns") };
+        let DialTarget::Dns { family, .. } = target else {
+            panic!("expected Dns")
+        };
         assert!(matches!(family, DnsFamily::Any));
     }
 
@@ -218,7 +229,9 @@ mod tests {
                 .parse()
                 .unwrap();
         let target = multiaddr_to_dial_target(&ma).unwrap();
-        let DialTarget::Dns { host, port, .. } = target else { panic!("expected Dns") };
+        let DialTarget::Dns { host, port, .. } = target else {
+            panic!("expected Dns")
+        };
         assert_eq!(host, "example.com");
         assert_eq!(port, 4001);
     }

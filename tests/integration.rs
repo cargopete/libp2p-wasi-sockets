@@ -14,8 +14,8 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 use wasmtime::{
-    Config, Engine, Store,
     component::{Component, Linker},
+    Config, Engine, Store,
 };
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
@@ -64,9 +64,7 @@ fn build_component(name: &str) -> Result<PathBuf> {
         bail!("build failed for component '{name}'");
     }
 
-    let wasm = PathBuf::from(format!(
-        "{target_dir}/wasm32-wasip2/debug/{name}.wasm"
-    ));
+    let wasm = PathBuf::from(format!("{target_dir}/wasm32-wasip2/debug/{name}.wasm"));
 
     if !wasm.exists() {
         bail!(
@@ -86,10 +84,7 @@ async fn run_component(wasm_path: &std::path::Path) -> Result<()> {
 }
 
 /// Like `run_component` but also injects the given environment variables.
-async fn run_component_with_env(
-    wasm_path: &std::path::Path,
-    env: &[(&str, &str)],
-) -> Result<()> {
+async fn run_component_with_env(wasm_path: &std::path::Path, env: &[(&str, &str)]) -> Result<()> {
     run_component_with_options(wasm_path, env, false).await
 }
 
@@ -134,12 +129,9 @@ async fn run_component_with_options(
     let mut linker: Linker<State> = Linker::new(&engine);
     wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
 
-    let command = wasmtime_wasi::p2::bindings::Command::instantiate_async(
-        &mut store,
-        &component,
-        &linker,
-    )
-    .await?;
+    let command =
+        wasmtime_wasi::p2::bindings::Command::instantiate_async(&mut store, &component, &linker)
+            .await?;
 
     command
         .wasi_cli_run()
@@ -240,9 +232,8 @@ async fn m5_interop() -> Result<()> {
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
 
     // ── Run WASM client and native echo server concurrently ───────────────────
-    let (wasm_result, native_result) = tokio::join!(
-        run_component_with_env(&wasm, &env_refs),
-        async move {
+    let (wasm_result, native_result) =
+        tokio::join!(run_component_with_env(&wasm, &env_refs), async move {
             // Accept one TCP connection from the WASM client.
             let (tcp_stream, _) = native_listener.accept().await.context("accept")?;
             let compat = tcp_stream.compat();
@@ -296,9 +287,7 @@ async fn m5_interop() -> Result<()> {
                 if server_pos < INTEROP_MSG.len() {
                     let ss = ss_opt.as_mut().unwrap();
                     while server_pos < INTEROP_MSG.len() {
-                        match Pin::new(&mut *ss)
-                            .poll_read(cx, &mut server_buf[server_pos..])
-                        {
+                        match Pin::new(&mut *ss).poll_read(cx, &mut server_buf[server_pos..]) {
                             Poll::Ready(Ok(0)) => panic!("native: unexpected EOF"),
                             Poll::Ready(Ok(n)) => server_pos += n,
                             Poll::Ready(Err(e)) => panic!("native read: {e}"),
@@ -350,8 +339,7 @@ async fn m5_interop() -> Result<()> {
                 }
             })
             .await
-        }
-    );
+        });
 
     wasm_result.context("WASM component failed")?;
     native_result.context("native echo handler failed")?;
@@ -410,7 +398,11 @@ fn build_identify_frame(keypair: &libp2p_identity::Keypair) -> Vec<u8> {
     proto_bytes(&mut msg, 3, b"/ipfs/id/1.0.0");
     proto_bytes(&mut msg, 3, b"/ipfs/ping/1.0.0");
     // /ip4/127.0.0.1/tcp/0 as raw multiaddr bytes
-    proto_bytes(&mut msg, 4, &[0x04, 0x7f, 0x00, 0x00, 0x01, 0x06, 0x00, 0x00]);
+    proto_bytes(
+        &mut msg,
+        4,
+        &[0x04, 0x7f, 0x00, 0x00, 0x01, 0x06, 0x00, 0x00],
+    );
     proto_bytes(&mut msg, 5, b"ipfs/0.1.0");
     proto_bytes(&mut msg, 6, b"test-native/1.0");
 
@@ -456,12 +448,10 @@ async fn m10_identify() -> Result<()> {
         ("NATIVE_ADDR".to_string(), native_multiaddr.to_string()),
         ("NATIVE_PEER_ID".to_string(), native_peer_id.to_string()),
     ];
-    let env_refs: Vec<(&str, &str)> =
-        env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
 
-    let (wasm_result, native_result) = tokio::join!(
-        run_component_with_env(&wasm, &env_refs),
-        async move {
+    let (wasm_result, native_result) =
+        tokio::join!(run_component_with_env(&wasm, &env_refs), async move {
             let (tcp_stream, _) = native_listener.accept().await.context("accept")?;
             let compat = tcp_stream.compat();
 
@@ -492,18 +482,23 @@ async fn m10_identify() -> Result<()> {
 
             let identify_frame = build_identify_frame(&native_key);
 
-            type NegFut = Pin<Box<dyn std::future::Future<
-                Output = std::result::Result<
-                    (&'static str, multistream_select::Negotiated<libp2p_yamux::Stream>),
-                    multistream_select::NegotiationError,
+            type NegFut = Pin<
+                Box<
+                    dyn std::future::Future<
+                        Output = std::result::Result<
+                            (
+                                &'static str,
+                                multistream_select::Negotiated<libp2p_yamux::Stream>,
+                            ),
+                            multistream_select::NegotiationError,
+                        >,
+                    >,
                 >,
-            >>>;
+            >;
 
             let mut stream_opt: Option<libp2p_yamux::Stream> = None;
             let mut neg_fut: Option<NegFut> = None;
-            let mut neg_stream: Option<
-                multistream_select::Negotiated<libp2p_yamux::Stream>,
-            > = None;
+            let mut neg_stream: Option<multistream_select::Negotiated<libp2p_yamux::Stream>> = None;
             let mut written: usize = 0;
             let mut flushed = false;
             let mut closed = false;
@@ -610,8 +605,7 @@ async fn m10_identify() -> Result<()> {
             drop(muxer);
             eprintln!("M10 native: done");
             Ok::<(), anyhow::Error>(())
-        }
-    );
+        });
 
     wasm_result.context("WASM identify component failed")?;
     native_result.context("native identify responder failed")?;
@@ -638,7 +632,7 @@ async fn m11_listener() -> Result<()> {
     use libp2p_core::muxing::StreamMuxer;
     use libp2p_core::upgrade::{OutboundConnectionUpgrade, UpgradeInfo};
     use libp2p_identity::Keypair;
-    use multistream_select::{Version, dialer_select_proto};
+    use multistream_select::{dialer_select_proto, Version};
     use tokio_util::compat::TokioAsyncReadCompatExt;
 
     let native_key = Keypair::generate_ed25519();
@@ -657,12 +651,10 @@ async fn m11_listener() -> Result<()> {
         ("LISTEN_PORT".to_string(), wasm_port.to_string()),
         ("NATIVE_PEER_ID".to_string(), native_peer_id.to_string()),
     ];
-    let env_refs: Vec<(&str, &str)> =
-        env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
 
-    let (wasm_result, native_result) = tokio::join!(
-        run_component_with_env(&wasm, &env_refs),
-        async move {
+    let (wasm_result, native_result) =
+        tokio::join!(run_component_with_env(&wasm, &env_refs), async move {
             // Give WASM time to bind and start listening.
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
@@ -698,26 +690,23 @@ async fn m11_listener() -> Result<()> {
 
             // Drive the muxer until WASM closes the connection (after it
             // processes ConnectionEstablished and main() returns).
-            poll_fn(|cx| {
-                match Pin::new(&mut muxer).poll_inbound(cx) {
-                    Poll::Ready(Err(_)) => {
-                        eprintln!("M11 native: connection closed by WASM");
-                        Poll::Ready(Ok::<(), anyhow::Error>(()))
-                    }
-                    Poll::Ready(Ok(s)) => {
-                        drop(s);
-                        Poll::Pending
-                    }
-                    Poll::Pending => Poll::Pending,
+            poll_fn(|cx| match Pin::new(&mut muxer).poll_inbound(cx) {
+                Poll::Ready(Err(_)) => {
+                    eprintln!("M11 native: connection closed by WASM");
+                    Poll::Ready(Ok::<(), anyhow::Error>(()))
                 }
+                Poll::Ready(Ok(s)) => {
+                    drop(s);
+                    Poll::Pending
+                }
+                Poll::Pending => Poll::Pending,
             })
             .await?;
 
             drop(muxer);
             eprintln!("M11 native: done");
             Ok::<(), anyhow::Error>(())
-        }
-    );
+        });
 
     wasm_result.context("WASM listener component failed")?;
     native_result.context("native dialer failed")?;
@@ -745,13 +734,11 @@ async fn m17_req_resp() -> Result<()> {
     let server_env = [("MODE", "server"), ("LISTEN_PORT", port_str.as_str())];
     let client_env = [("MODE", "client"), ("SERVER_ADDR", server_addr.as_str())];
 
-    let (server_result, client_result) = tokio::join!(
-        run_component_with_env(&wasm, &server_env),
-        async {
+    let (server_result, client_result) =
+        tokio::join!(run_component_with_env(&wasm, &server_env), async {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             run_component_with_env(&wasm, &client_env).await
-        },
-    );
+        },);
 
     server_result.context("WASM req-resp server failed")?;
     client_result.context("WASM req-resp client failed")?;
@@ -769,8 +756,8 @@ async fn start_rendezvous_server() -> Result<libp2p_core::Multiaddr> {
     use std::pin::Pin;
 
     use futures::StreamExt as _;
-    use libp2p_core::Transport as _;
     use libp2p_core::upgrade::Version;
+    use libp2p_core::Transport as _;
     use libp2p_identity::Keypair;
     use libp2p_swarm::{Config as SwarmConfig, Swarm, SwarmEvent};
 
@@ -878,13 +865,11 @@ async fn m14_kad() -> Result<()> {
     let provide_env = [("MODE", "provide"), ("LISTEN_PORT", port_str.as_str())];
     let seek_env = [("MODE", "seek"), ("PROVIDER_ADDR", provider_addr.as_str())];
 
-    let (provider_result, seeker_result) = tokio::join!(
-        run_component_with_env(&wasm, &provide_env),
-        async {
+    let (provider_result, seeker_result) =
+        tokio::join!(run_component_with_env(&wasm, &provide_env), async {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             run_component_with_env(&wasm, &seek_env).await
-        },
-    );
+        },);
 
     provider_result.context("WASM Kademlia provider failed")?;
     seeker_result.context("WASM Kademlia seeker failed")?;
@@ -917,13 +902,11 @@ async fn m12_wasm_wasm() -> Result<()> {
     let listen_env = [("LISTEN_PORT", port_str.as_str())];
     let dial_env = [("DIAL_ADDR", dial_addr.as_str())];
 
-    let (listener_result, dialer_result) = tokio::join!(
-        run_component_with_env(&wasm_listener, &listen_env),
-        async {
+    let (listener_result, dialer_result) =
+        tokio::join!(run_component_with_env(&wasm_listener, &listen_env), async {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             run_component_with_env(&wasm_dialer, &dial_env).await
-        },
-    );
+        },);
 
     listener_result.context("WASM p2p-listener failed")?;
     dialer_result.context("WASM p2p-dialer failed")?;
@@ -954,13 +937,11 @@ async fn m13_gossipsub() -> Result<()> {
     let listen_env = [("MODE", "listen"), ("LISTEN_PORT", port_str.as_str())];
     let publish_env = [("MODE", "publish"), ("DIAL_ADDR", dial_addr.as_str())];
 
-    let (listener_result, publisher_result) = tokio::join!(
-        run_component_with_env(&wasm, &listen_env),
-        async {
+    let (listener_result, publisher_result) =
+        tokio::join!(run_component_with_env(&wasm, &listen_env), async {
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             run_component_with_env(&wasm, &publish_env).await
-        },
-    );
+        },);
 
     listener_result.context("WASM gossipsub-listener failed")?;
     publisher_result.context("WASM gossipsub-publisher failed")?;
@@ -1005,12 +986,10 @@ async fn m9_ping() -> Result<()> {
         ("NATIVE_ADDR".to_string(), native_multiaddr.to_string()),
         ("NATIVE_PEER_ID".to_string(), native_peer_id.to_string()),
     ];
-    let env_refs: Vec<(&str, &str)> =
-        env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
 
-    let (wasm_result, native_result) = tokio::join!(
-        run_component_with_env(&wasm, &env_refs),
-        async move {
+    let (wasm_result, native_result) =
+        tokio::join!(run_component_with_env(&wasm, &env_refs), async move {
             let (tcp_stream, _) = native_listener.accept().await.context("accept")?;
             let compat = tcp_stream.compat();
 
@@ -1043,18 +1022,23 @@ async fn m9_ping() -> Result<()> {
             // Using poll_fn so we can drive the yamux muxer alongside the
             // substream operations (yamux needs its connection polled to
             // process frames and deliver data to open streams).
-            type NegFut = Pin<Box<dyn std::future::Future<
-                Output = std::result::Result<
-                    (&'static str, multistream_select::Negotiated<libp2p_yamux::Stream>),
-                    multistream_select::NegotiationError,
+            type NegFut = Pin<
+                Box<
+                    dyn std::future::Future<
+                        Output = std::result::Result<
+                            (
+                                &'static str,
+                                multistream_select::Negotiated<libp2p_yamux::Stream>,
+                            ),
+                            multistream_select::NegotiationError,
+                        >,
+                    >,
                 >,
-            >>>;
+            >;
 
             let mut stream_opt: Option<libp2p_yamux::Stream> = None;
             let mut neg_fut: Option<NegFut> = None;
-            let mut neg_stream: Option<
-                multistream_select::Negotiated<libp2p_yamux::Stream>,
-            > = None;
+            let mut neg_stream: Option<multistream_select::Negotiated<libp2p_yamux::Stream>> = None;
             let mut ping_buf = [0u8; 32];
             let mut read_pos: usize = 0;
             let mut written: usize = 0;
@@ -1172,8 +1156,7 @@ async fn m9_ping() -> Result<()> {
             drop(muxer);
             eprintln!("M9 native: done");
             Ok::<(), anyhow::Error>(())
-        }
-    );
+        });
 
     wasm_result.context("WASM ping component failed")?;
     native_result.context("native ping responder failed")?;
@@ -1216,13 +1199,11 @@ async fn m8_swarm_connect() -> Result<()> {
         ("NATIVE_ADDR".to_string(), native_multiaddr.to_string()),
         ("NATIVE_PEER_ID".to_string(), native_peer_id.to_string()),
     ];
-    let env_refs: Vec<(&str, &str)> =
-        env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_ref(), v.as_ref())).collect();
 
     // ── Run WASM swarm and native handshake peer concurrently ─────────────────
-    let (wasm_result, native_result) = tokio::join!(
-        run_component_with_env(&wasm, &env_refs),
-        async move {
+    let (wasm_result, native_result) =
+        tokio::join!(run_component_with_env(&wasm, &env_refs), async move {
             let (tcp_stream, _) = native_listener.accept().await.context("accept")?;
             let compat = tcp_stream.compat();
 
@@ -1260,8 +1241,7 @@ async fn m8_swarm_connect() -> Result<()> {
             drop(muxer);
             eprintln!("M8 native: done");
             Ok::<(), anyhow::Error>(())
-        }
-    );
+        });
 
     wasm_result.context("WASM swarm component failed")?;
     native_result.context("native handshake peer failed")?;

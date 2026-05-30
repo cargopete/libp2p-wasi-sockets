@@ -62,6 +62,10 @@ impl Default for Config {
 #[cfg(target_arch = "wasm32")]
 type WasmBoxFut<T> = Pin<Box<dyn std::future::Future<Output = T>>>;
 
+/// Result of an in-flight `accept`: a connected stream plus the peer address.
+#[cfg(target_arch = "wasm32")]
+type AcceptResult = std::io::Result<(WasiTcpStream, Option<SocketAddr>)>;
+
 /// Thin `Send` wrapper for a `WasmBoxFut`.
 ///
 /// wasm32-wasip2 is single-threaded — WASI resource handles (plain integers) are
@@ -79,10 +83,7 @@ unsafe impl<T> Send for SendDialFut<T> {}
 #[cfg(target_arch = "wasm32")]
 impl<T> std::future::Future for SendDialFut<T> {
     type Output = T;
-    fn poll(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<T> {
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<T> {
         // SAFETY: we do not move `self.0` out of its pin.
         unsafe { self.map_unchecked_mut(|s| &mut s.0) }.poll(cx)
     }
@@ -110,7 +111,7 @@ struct ListenerState {
     /// In-flight bind+listen future.
     bind_future: Option<WasmBoxFut<std::io::Result<RawListener>>>,
     /// In-flight accept future.
-    accept_future: Option<WasmBoxFut<std::io::Result<(WasiTcpStream, Option<SocketAddr>)>>>,
+    accept_future: Option<WasmBoxFut<AcceptResult>>,
     /// Whether we have emitted a `NewAddress` event for this listener.
     /// Set back to `false` after emitting `AddressExpired` so the next `poll`
     /// knows to emit `ListenerClosed` and remove the entry.
@@ -292,17 +293,16 @@ impl Transport for WasiTcpTransport {
                     )));
                 }
 
-                let socket =
-                    create_tcp_socket(IpAddressFamily::Ipv4).map_err(|e| match e {
-                        ErrorCode::AccessDenied => {
-                            warn!(
-                                "Network capability denied — pass `-S inherit-network` \
+                let socket = create_tcp_socket(IpAddressFamily::Ipv4).map_err(|e| match e {
+                    ErrorCode::AccessDenied => {
+                        warn!(
+                            "Network capability denied — pass `-S inherit-network` \
                                  to wasmtime to grant the component network access."
-                            );
-                            Error::AccessDenied
-                        }
-                        _ => Error::Io(wasi_io_err(e)),
-                    })?;
+                        );
+                        Error::AccessDenied
+                    }
+                    _ => Error::Io(wasi_io_err(e)),
+                })?;
 
                 if let Some(ka) = keep_alive {
                     let _ = socket.set_keep_alive_enabled(true);
@@ -311,34 +311,40 @@ impl Transport for WasiTcpTransport {
 
                 let network = instance_network();
                 let wasi_remote = sockaddr_to_wasi(sock_addr);
-                socket.start_connect(&network, wasi_remote).map_err(|e| match e {
-                    ErrorCode::AccessDenied => {
-                        warn!(
-                            "Network capability denied — pass `-S inherit-network` \
-                             to wasmtime to grant the component network access."
-                        );
-                        Error::AccessDenied
-                    }
-                    _ => Error::Io(wasi_io_err(e)),
-                })?;
-
-                AsyncPollable::new(socket.subscribe()).wait_for().await;
-
-                let (input, output) =
-                    socket.finish_connect().map_err(|e| match e {
+                socket
+                    .start_connect(&network, wasi_remote)
+                    .map_err(|e| match e {
                         ErrorCode::AccessDenied => {
                             warn!(
                                 "Network capability denied — pass `-S inherit-network` \
-                                 to wasmtime to grant the component network access."
+                             to wasmtime to grant the component network access."
                             );
                             Error::AccessDenied
                         }
                         _ => Error::Io(wasi_io_err(e)),
                     })?;
 
-                Ok(WasiTcpStream::from_raw(socket, input, output, Some(sock_addr)))
+                AsyncPollable::new(socket.subscribe()).wait_for().await;
+
+                let (input, output) = socket.finish_connect().map_err(|e| match e {
+                    ErrorCode::AccessDenied => {
+                        warn!(
+                            "Network capability denied — pass `-S inherit-network` \
+                                 to wasmtime to grant the component network access."
+                        );
+                        Error::AccessDenied
+                    }
+                    _ => Error::Io(wasi_io_err(e)),
+                })?;
+
+                Ok(WasiTcpStream::from_raw(
+                    socket,
+                    input,
+                    output,
+                    Some(sock_addr),
+                ))
             });
-            return Ok(SendDialFut(dial_fut));
+            Ok(SendDialFut(dial_fut))
         }
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -430,17 +436,13 @@ impl Transport for WasiTcpTransport {
                                     // Peer address from the accepted socket — this is the real
                                     // remote address, not the listen address placeholder used
                                     // in earlier versions.
-                                    let peer_addr = accepted
-                                        .remote_address()
-                                        .map(wasi_sockaddr_to_std)
-                                        .ok();
-                                    let stream = WasiTcpStream::from_raw(
-                                        accepted, input, output, peer_addr,
+                                    let peer_addr =
+                                        accepted.remote_address().map(wasi_sockaddr_to_std).ok();
+                                    let stream =
+                                        WasiTcpStream::from_raw(accepted, input, output, peer_addr);
+                                    return Ok::<(WasiTcpStream, Option<SocketAddr>), std::io::Error>(
+                                        (stream, peer_addr),
                                     );
-                                    return Ok::<
-                                        (WasiTcpStream, Option<SocketAddr>),
-                                        std::io::Error,
-                                    >((stream, peer_addr));
                                 }
                                 Err(ErrorCode::WouldBlock) => {
                                     AsyncPollable::new(listener.socket.subscribe())
@@ -534,5 +536,5 @@ fn wasi_sockaddr_to_std(addr: IpSocketAddress) -> SocketAddr {
 /// Wrap a WASI `ErrorCode` as a generic `std::io::Error`.
 #[cfg(target_arch = "wasm32")]
 fn wasi_io_err(e: ErrorCode) -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::Other, format!("{e:?}"))
+    std::io::Error::other(format!("{e:?}"))
 }

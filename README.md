@@ -245,7 +245,7 @@ permission error.
 
 ## Requirements
 
-- Rust **1.83+**
+- Rust **1.91+** (required by `wstd 0.6`, which uses edition 2024)
 - Target: `wasm32-wasip2`
 - WASI 0.2 host: Wasmtime ≥ 44, Spin ≥ 3.5, or any WASI 0.2.1-compatible runtime
 

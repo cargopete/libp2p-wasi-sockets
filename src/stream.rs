@@ -39,8 +39,10 @@ pub struct WasiTcpStream {
     #[cfg(target_arch = "wasm32")]
     output: Arc<AsyncOutputStream>,
     /// Remote peer address, available for inbound connections (accepted by a
-    /// listener) and outbound connections (dialled directly).
+    /// listener) and outbound connections (dialled directly).  Retained for
+    /// diagnostics / future use; not currently surfaced through a public API.
     #[cfg(target_arch = "wasm32")]
+    #[allow(dead_code)]
     peer_addr: Option<SocketAddr>,
     #[cfg(target_arch = "wasm32")]
     read_state: ReadState,
@@ -86,10 +88,10 @@ impl WasiTcpStream {
     ///
     /// # Arguments
     ///
-    /// * `socket`    — The accepted or connected WASI TCP socket.  Kept alive
-    ///                 to ensure the connection remains open; shutdown on Drop.
-    /// * `input`     — The WASI input stream from `accept()` / `finish_connect()`.
-    /// * `output`    — The WASI output stream from the same.
+    /// * `socket` — The accepted or connected WASI TCP socket.  Kept alive to
+    ///   ensure the connection remains open; shutdown on Drop.
+    /// * `input` — The WASI input stream from `accept()` / `finish_connect()`.
+    /// * `output` — The WASI output stream from the same.
     /// * `peer_addr` — Remote peer's `SocketAddr`, if known.
     #[cfg(target_arch = "wasm32")]
     pub(crate) fn from_raw(
@@ -110,6 +112,7 @@ impl WasiTcpStream {
 
     /// Returns the remote peer's address, if available.
     #[cfg(target_arch = "wasm32")]
+    #[allow(dead_code)]
     pub(crate) fn peer_addr(&self) -> Option<SocketAddr> {
         self.peer_addr
     }
@@ -234,10 +237,7 @@ impl AsyncWrite for WasiTcpStream {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_close(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_close(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         // Flush remaining data; the socket is shut down on Drop.
         self.as_mut().poll_flush(cx)
     }

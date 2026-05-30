@@ -37,17 +37,12 @@ mod imp {
         let mut transport = WasiTcpTransport::default();
 
         transport
-            .listen_on(
-                ListenerId::next(),
-                "/ip4/0.0.0.0/tcp/4001".parse().unwrap(),
-            )
+            .listen_on(ListenerId::next(), "/ip4/0.0.0.0/tcp/4001".parse().unwrap())
             .expect("listen_on");
 
         // Drive the transport until the OS assigns the address.
         let addr = poll_fn(|cx| match Pin::new(&mut transport).poll(cx) {
-            Poll::Ready(TransportEvent::NewAddress { listen_addr, .. }) => {
-                Poll::Ready(listen_addr)
-            }
+            Poll::Ready(TransportEvent::NewAddress { listen_addr, .. }) => Poll::Ready(listen_addr),
             Poll::Ready(_) | Poll::Pending => Poll::Pending,
         })
         .await;

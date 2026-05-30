@@ -27,10 +27,9 @@ pub(crate) async fn resolve_host(
 ) -> Result<SocketAddr, Error> {
     let network = instance_network();
     let stream = resolve_addresses(&network, host).map_err(|e| {
-        Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("DNS: could not start resolution for '{host}': {e:?}"),
-        ))
+        Error::Io(std::io::Error::other(format!(
+            "DNS: could not start resolution for '{host}': {e:?}"
+        )))
     })?;
 
     loop {
@@ -43,23 +42,19 @@ pub(crate) async fn resolve_host(
                 // Wrong address family — continue iterating.
             }
             Ok(None) => {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!(
-                        "DNS: no {} addresses found for '{host}'",
-                        family.description()
-                    ),
-                )));
+                return Err(Error::Io(std::io::Error::other(format!(
+                    "DNS: no {} addresses found for '{host}'",
+                    family.description()
+                ))));
             }
             Err(ErrorCode::WouldBlock) => {
                 let pollable = AsyncPollable::new(stream.subscribe());
                 pollable.wait_for().await;
             }
             Err(e) => {
-                return Err(Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("DNS: resolution failed for '{host}': {e:?}"),
-                )));
+                return Err(Error::Io(std::io::Error::other(format!(
+                    "DNS: resolution failed for '{host}': {e:?}"
+                ))));
             }
         }
     }
