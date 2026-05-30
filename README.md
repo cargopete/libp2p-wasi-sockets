@@ -205,6 +205,8 @@ Several libp2p behaviours (`libp2p-ping`, `libp2p-swarm`'s idle-connection timeo
 
 **The fix**: patch `futures_timer` with a WASI-native implementation that uses `wasi:clocks/monotonic-clock::subscribe_duration` instead of a background thread. This crate ships `crates/futures-timer-wasi/` for exactly this purpose — add it to your `[patch.crates-io]` as shown in the Quick Start above.
 
+**The long-term fix**: a target-gated `wasm32-wasip2` backend belongs in `futures-timer` itself, which would remove the need for the patch entirely. The proposed upstream change (verified to build for wasip2/wasip1/native and to pass the ping integration test) is documented in [`crates/futures-timer-wasi/UPSTREAM.md`](crates/futures-timer-wasi/UPSTREAM.md).
+
 ### Do not pull in `libp2p-tcp`
 
 The umbrella `libp2p` crate gates `libp2p-tcp` off for all wasm targets, but if you pull it in manually the build will fail. Depend on sub-crates directly and verify:

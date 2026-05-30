@@ -1,2 +1,5 @@
 /target
 tests/component/*/target/
+
+# Build artifacts from the futures-timer shim crate
+crates/*/target/

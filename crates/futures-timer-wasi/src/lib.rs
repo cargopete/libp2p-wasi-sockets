@@ -11,12 +11,12 @@
 #![deny(missing_docs)]
 #![warn(missing_debug_implementations)]
 
-#[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
+#[cfg(all(target_arch = "wasm32", target_os = "wasi", target_env = "p2"))]
 mod wasi_impl;
-#[cfg(not(all(target_arch = "wasm32", target_os = "wasi")))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "wasi", target_env = "p2")))]
 mod native_impl;
 
-#[cfg(all(target_arch = "wasm32", target_os = "wasi"))]
+#[cfg(all(target_arch = "wasm32", target_os = "wasi", target_env = "p2"))]
 pub use wasi_impl::Delay;
-#[cfg(not(all(target_arch = "wasm32", target_os = "wasi")))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "wasi", target_env = "p2")))]
 pub use native_impl::Delay;

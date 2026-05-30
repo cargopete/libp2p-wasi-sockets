@@ -24,7 +24,7 @@ impl Delay {
     /// Must be called from within a `wstd::runtime::block_on` context (i.e.
     /// inside `#[wstd::main]` or any `spawn`'d task).
     pub fn new(dur: Duration) -> Self {
-        let ns = dur.as_nanos() as u64;
+        let ns = dur.as_nanos().min(u64::MAX as u128) as u64;
         let raw = wasip2::clocks::monotonic_clock::subscribe_duration(ns);
         let pollable = AsyncPollable::new(raw);
         Delay {
@@ -34,7 +34,7 @@ impl Delay {
 
     /// Reset this delay to fire after `dur` from now.
     pub fn reset(&mut self, dur: Duration) {
-        let ns = dur.as_nanos() as u64;
+        let ns = dur.as_nanos().min(u64::MAX as u128) as u64;
         let raw = wasip2::clocks::monotonic_clock::subscribe_duration(ns);
         let pollable = AsyncPollable::new(raw);
         self.wait_for = pollable.wait_for();
